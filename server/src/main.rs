@@ -45,8 +45,17 @@ async fn main() {
         .route("/api/sessions/{code}/verify", get(http::verify))
         .route("/ws", get(ws::ws_handler))
         // Anything else is the SPA. The fallback to index.html is what makes
-        // /host/ABC123 work on a hard refresh.
-        .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(&index)))
+        // /host/ABC123 work on a hard refresh — and the QR code points straight
+        // at /join/ABC123, so this is the path most people arrive on.
+        //
+        // `fallback`, not `not_found_service`: the latter serves index.html but
+        // forces a 404 status. Browsers render the body anyway, so the app
+        // appears to work while every deep link reports as missing.
+        // Hashed build output is served on its own, with no SPA fallback. A
+        // missing chunk should be a 404, not index.html served as JavaScript —
+        // that turns a stale deploy into an inscrutable MIME type error.
+        .nest_service("/assets", ServeDir::new(format!("{static_dir}/assets")))
+        .fallback_service(ServeDir::new(&static_dir).fallback(ServeFile::new(&index)))
         .layer(TraceLayer::new_for_http())
         .with_state(app_state.clone());
 

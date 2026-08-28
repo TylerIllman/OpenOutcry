@@ -1,0 +1,37 @@
+# Session state lives in memory, so this app must run as EXACTLY ONE machine.
+# Never zero, never two:
+#   * auto_stop_machines = 'off' and min_machines_running = 1 keep it awake — a
+#     stopped machine would drop every game in progress.
+#   * Do not `fly scale count 2`. A second machine would hold a second, separate
+#     set of sessions, and half the room would join a market the other half
+#     cannot see.
+
+app = "open-outcry"
+primary_region = "lhr"
+
+[build]
+
+[env]
+  PORT = "8080"
+  STATIC_DIR = "/app/web/dist"
+  DB_PATH = "/data/open_outcry.db"
+  RUST_LOG = "server=info,tower_http=warn"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = 'off'
+  min_machines_running = 1
+  processes = ["app"]
+
+# The command log and trade history. Not required for the game to run — the
+# server degrades to no persistence if this is unavailable — but it is what
+# makes replay and CSV export work.
+[mounts]
+  source = "open_outcry_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

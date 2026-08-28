@@ -9,10 +9,46 @@ out how they did.
 
 No accounts. No sign-up. One URL and a six-character code.
 
+---
+
+## Running it
+
+**One process, the way production runs.** The Rust binary serves the built React
+bundle and the socket together.
+
 ```bash
 cd web && npm install && npm run build && cd ..
-cargo run -p server          # http://localhost:8080
+cargo run -p server
 ```
+
+Then open <http://localhost:8080>.
+
+**Front-end work, with hot reload.** Two terminals — Vite proxies `/api` and
+`/ws` through to the server on 8080.
+
+```bash
+cargo run -p server
+```
+
+```bash
+cd web && npm run dev
+```
+
+Then open <http://localhost:5173>.
+
+**Playing on real phones while it runs on your laptop.** The server binds
+`0.0.0.0`, so open it on your machine's LAN address rather than `localhost` —
+e.g. `http://192.168.0.126:8080`. The QR code encodes whatever origin the host
+page was loaded from, so phones on the same Wi-Fi will scan straight into the
+right place. Some guest networks block device-to-device traffic; if the QR
+resolves but nothing loads, that is why.
+
+| | |
+|---|---|
+| `PORT` | default `8080` |
+| `STATIC_DIR` | default `web/dist` |
+| `DB_PATH` | default `open_outcry.db` |
+| `SESSION_TTL_MS` | idle sweep, default six hours |
 
 ---
 
@@ -133,6 +169,43 @@ counting a player's resting orders by walking the entire book, on every single
 order. Caching those counts on `Position` made it flat — a 210× improvement at
 depth 10,000. `Book::working()` still does the slow walk, and the property tests
 assert the cached counters agree with it.
+
+## Deploying
+
+One Fly.io app. The `Dockerfile` builds the front end and the server and ships a
+single image.
+
+```bash
+brew install flyctl
+fly auth login
+```
+
+App names are globally unique, so change `app = "open-outcry"` in `fly.toml` to
+something free before the first deploy. Then:
+
+```bash
+fly apps create your-app-name
+fly volumes create open_outcry_data --size 1 --region lhr
+fly deploy
+```
+
+Add `--remote-only` to `fly deploy` to build on Fly's builders instead of your
+own Docker.
+
+**This app must run as exactly one machine.** All session state is in memory, so:
+
+- `auto_stop_machines = 'off'` and `min_machines_running = 1` are already set. A
+  machine that stops to save money takes every game in progress with it.
+- Never `fly scale count 2`. A second machine holds a second, separate set of
+  sessions, and half the room would join a market the other half cannot see.
+  Check with `fly status` that the count is 1.
+
+The volume holds the command log and trade history, which is what makes replay
+and CSV export work. The game still runs without it — persistence is best-effort
+and the server degrades to no history rather than refusing to start.
+
+A deploy restarts the machine and ends any game in progress. Deploy between
+rounds, not during one.
 
 ## Reading further
 
