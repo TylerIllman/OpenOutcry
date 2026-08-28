@@ -167,6 +167,28 @@ differently in dev and prod.
 *Constraint:* `auto_stop_machines = false`, exactly one always-on machine. In-memory
 state means never zero instances and never two.
 
+### 25. Crossing limit orders match immediately
+A bid at or above the best offer trades at the **resting** order's price, so the
+aggressor gets the price improvement. Not decided during scoping; the alternative
+lets the book sit crossed, which is nonsense.
+*Consequence:* because every order is one lot, a crossing order matches exactly
+one resting order and never rests.
+
+### 26. No partial fills exist
+Falls out of decision 4. One lot per order means a trade always fully consumes
+exactly one resting order. Worth stating explicitly because it removes a whole
+category of engine complexity — and because an interviewer will ask about it.
+
+### 27. Position limit counts working orders
+`net + working_bids <= limit` and `-net + working_offers <= limit`, so a player
+can never breach the limit even if every resting order fills at once.
+*Rejected:* checking only at fill time, which means rejecting a trade after the
+fact — worse for both the engine and the player.
+
+### 28. Self-trades are tagged in the protocol
+`Trade.selfTrade` is on the wire and the tape renders a `self` chip. This is the
+mitigation raised against decision 19, now taken.
+
 ---
 
 ## Still open

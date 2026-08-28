@@ -1,0 +1,11 @@
+[package]
+name = "engine"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+# Property-based tests over the book invariants. See tests/rules.rs.
+# proptest = "1"

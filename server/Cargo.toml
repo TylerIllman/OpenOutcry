@@ -1,0 +1,26 @@
+[package]
+name = "server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }
+
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+futures-util = "0.3"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TODO(tyler): add `ts-rs` and put #[derive(TS)] on everything in protocol.rs, so
+# `cargo test` regenerates web/src/protocol.ts and drift fails CI instead of
+# showing up as a blank order book in the pub.
+# ts-rs = "11"

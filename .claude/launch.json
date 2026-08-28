@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "open-outcry",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "server"],
+      "port": 8080
+    }
+  ]
+}
