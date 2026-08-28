@@ -1,29 +1,22 @@
 //! The matching engine.
 //!
-//! This crate is deliberately pure: no I/O, no clock, no async, no networking.
-//! Everything it does is `apply(&mut self, Command) -> Vec<Event>`. That is what
-//! makes the whole session replayable — feed the persisted command log back in
-//! and you must get byte-identical state.
+//! Everything happens through one function: `Market::apply`. Give it a Command,
+//! get back a list of Events. It does no I/O, no networking, and never looks at
+//! the clock — which is what makes a whole session replayable.
 //!
-//! Design notes that follow from SPEC.md:
-//!
-//!  * **Every order is one lot.** A trade therefore always fully consumes exactly
-//!    one resting order. There are no partial fills anywhere in this engine.
-//!  * **Time priority is sequence priority.** Ordering never depends on wall-clock
-//!    time, because that would make replay non-deterministic.
-//!  * **Prices are scaled integers**, not floats. `f64` is not `Ord`, so it cannot
-//!    key a `BTreeMap`, and float arithmetic would make P&L drift.
-//!  * **Self-trades are allowed** (DECISIONS.md #19), but are tagged.
+//! Work through GUIDE.md in the repo root. It builds this up one step at a time.
 
 use std::collections::{BTreeMap, VecDeque};
 
 pub mod ids;
 pub use ids::{OrderId, PlayerId};
 
-/// Prices are stored as micro-units: 46.25 is `Price(46_250_000)`.
+/// A price, stored as a whole number of millionths. 46.25 is `Price(46_250_000)`.
 ///
-/// This gives exact arithmetic for P&L and lets prices key a `BTreeMap`
-/// directly, which `f64` cannot do because it is not `Ord`.
+/// Why not just use `f64`? Two reasons, and both bite in practice:
+///   * 0.1 + 0.2 != 0.3 in floating point, so P&L would slowly drift.
+///   * Checking "is this price a multiple of the tick size" is exact with
+///     integers (`price.0 % tick.0 == 0`) and a mess with floats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Price(pub i64);
 
@@ -39,22 +32,14 @@ impl Price {
     }
 }
 
+/// Which side of the book an order sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Bid,
     Offer,
 }
 
-impl Side {
-    pub fn opposite(self) -> Side {
-        match self {
-            Side::Bid => Side::Offer,
-            Side::Offer => Side::Bid,
-        }
-    }
-}
-
-/// What an aggressor did. MINE => `Buy`, YOURS => `Sell`.
+/// What an aggressor did. MINE is `Buy`, YOURS is `Sell`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Buy,
@@ -67,7 +52,9 @@ pub struct Order {
     pub player: PlayerId,
     pub side: Side,
     pub price: Price,
-    /// Sequence at which this order entered the book. This is its time priority.
+    /// Position in the queue. Lower means earlier, so this is time priority.
+    /// It is a counter, never a timestamp — timestamps would make replay
+    /// non-deterministic.
     pub seq: u64,
 }
 
@@ -78,6 +65,7 @@ pub struct Trade {
     pub buyer: PlayerId,
     pub seller: PlayerId,
     pub aggressor: Direction,
+    /// The order that was sitting in the book and got consumed.
     pub resting_order: OrderId,
     pub self_trade: bool,
 }
@@ -90,8 +78,7 @@ pub enum Phase {
     Settled,
 }
 
-/// Commands are the only way to mutate the engine. They are what gets persisted
-/// and replayed.
+/// The only way to change the market. These get persisted and replayed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     AddPlayer { player: PlayerId },
@@ -102,6 +89,7 @@ pub enum Command {
     Settle { true_value: Price },
 }
 
+/// What actually happened. The server turns these into messages for the browser.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     PlayerAdded { player: PlayerId },
@@ -112,6 +100,7 @@ pub enum Event {
     Settled { true_value: Price },
 }
 
+/// Why a command was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reject {
     PositionLimit,
@@ -124,43 +113,60 @@ pub enum Reject {
     UnknownPlayer,
 }
 
-/// Per-player book state. Position is derived, but cached for limit checks.
-#[derive(Debug, Default, Clone)]
+/// What a player is carrying.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Position {
-    /// Net lots. Positive is long.
+    /// Net lots. Positive is long, negative is short.
     pub net: i64,
-    /// Sum of sells minus sum of buys, in price micro-units.
+    /// Money in: sum of what they sold for, minus what they paid. In millionths.
     pub cash: i64,
-    /// Resting bids, for working-order exposure in the limit check.
-    pub working_bids: u32,
-    /// Resting offers, for working-order exposure in the limit check.
-    pub working_offers: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// `None` means any price is accepted.
+    /// `None` means any price is allowed.
     pub tick: Option<Price>,
     pub position_limit: i64,
 }
 
-/// The order book. Bids and offers each key a price to a FIFO queue, so
-/// price-then-sequence priority falls out of the data structure.
-#[derive(Debug, Default)]
+/// The order book.
+///
+/// Each side maps a price to a queue of orders sitting at that price.
+///
+///   * `BTreeMap` keeps prices **sorted**, so the best price is just the first
+///     or last key. A `HashMap` would not — that is the whole reason for using
+///     it here.
+///   * `VecDeque` is a queue you can push onto the back and pop from the front,
+///     which is exactly time priority: first in, first filled.
+///
+/// So price-then-time priority falls out of the data structure rather than
+/// being something you have to remember to enforce.
+#[derive(Debug, Default, Clone)]
 pub struct Book {
     pub bids: BTreeMap<Price, VecDeque<Order>>,
     pub offers: BTreeMap<Price, VecDeque<Order>>,
 }
 
 impl Book {
-    /// Highest bid. `BTreeMap` is ascending, so the best bid is the last key.
+    /// Best bid is the HIGHEST price, and `BTreeMap` sorts ascending, so it is
+    /// the last key. `next_back()` walks the iterator from the end.
     pub fn best_bid(&self) -> Option<&Order> {
         self.bids.values().next_back()?.front()
     }
 
-    /// Lowest offer, which is the first key.
+    /// Best offer is the LOWEST price, so it is the first key.
     pub fn best_offer(&self) -> Option<&Order> {
         self.offers.values().next()?.front()
+    }
+
+    /// How many orders this player has resting on one side. The position limit
+    /// uses this, because an order that could still fill is exposure.
+    pub fn working(&self, player: &PlayerId, side: Side) -> i64 {
+        let levels = match side {
+            Side::Bid => &self.bids,
+            Side::Offer => &self.offers,
+        };
+        levels.values().flatten().filter(|o| &o.player == player).count() as i64
     }
 }
 
@@ -170,6 +176,7 @@ pub struct Market {
     pub phase: Phase,
     pub book: Book,
     pub positions: BTreeMap<PlayerId, Position>,
+    /// Counter behind both order sequence numbers and trade sequence numbers.
     pub seq: u64,
     next_order_id: u64,
 }
@@ -186,44 +193,21 @@ impl Market {
         }
     }
 
-    fn next_order_id(&mut self) -> OrderId {
+    /// Hand out the next order id. Call this once per new order.
+    pub fn next_order_id(&mut self) -> OrderId {
         self.next_order_id += 1;
         OrderId(self.next_order_id)
     }
 
-    /// The single entry point. Deterministic: same state plus same command must
-    /// always produce the same events.
+    /// The one entry point.
     ///
-    /// ## Rules this must enforce
-    ///
-    /// 1. **Phase.** `PlaceOrder`, `CancelOrder` and `Take` are only valid while
-    ///    `Phase::Open`; otherwise `Reject::NotOpen`.
-    /// 2. **Tick.** If `config.tick` is `Some(t)`, a price not divisible by `t`
-    ///    is `Reject::BadTick`. Non-positive prices are `Reject::BadPrice`.
-    /// 3. **Crossing limit orders match immediately.** A bid at or above the best
-    ///    offer trades at the *resting* order's price, not the incoming one.
-    ///    Because every order is one lot, such an order matches exactly one
-    ///    resting order and never rests. The book must never end up crossed.
-    /// 4. **`Take` is a marketable order** against the best price on the far side.
-    ///    Empty far side is `Reject::NoLiquidity`.
-    /// 5. **Priority is price, then sequence.** Cancelling out of the middle of a
-    ///    queue must not disturb the order of everyone else in it.
-    /// 6. **Self-trades are allowed** and produce a `Trade` with `self_trade:
-    ///    true`. Both legs land on the same player, so their net position is
-    ///    unchanged and cash nets to zero.
-    /// 7. **Position limit** is enforced on *potential* position, counting
-    ///    working orders — `net + working_bids <= limit` and
-    ///    `-net + working_offers <= limit`. This means a player can never breach
-    ///    the limit even if every one of their resting orders fills at once.
-    ///    Breach is `Reject::PositionLimit`.
-    /// 8. **Cancel** only your own order; another player's is `Reject::NotYourOrder`
-    ///    and a missing one is `Reject::UnknownOrder`.
+    /// The rules live in GUIDE.md, one stage at a time. Start at Stage 1.
     pub fn apply(&mut self, _cmd: Command) -> Result<Vec<Event>, Reject> {
-        // TODO(tyler): this is yours. See tests/rules.rs for the spec as tests.
-        todo!("matching engine")
+        todo!("GUIDE.md, Stage 1, Step 1")
     }
 
-    /// Final P&L. `cash + net * true_value`, in micro-units.
+    /// Final score for one player: the cash they took in, plus whatever their
+    /// position turned out to be worth.
     pub fn settle_pnl(&self, player: &PlayerId, true_value: Price) -> i64 {
         let p = self.positions.get(player).cloned().unwrap_or_default();
         p.cash + p.net * true_value.0
