@@ -2,6 +2,14 @@
 
 This is the order to build things in, assuming Rust is new to you.
 
+> **The engine is now implemented on `main`.** This guide still works — check out
+> the `pre-backend` tag and build it yourself, with the finished version as a
+> reference you can diff against when you get stuck:
+>
+> ```bash
+> git checkout pre-backend -b my-attempt
+> ```
+
 Each step is small enough to finish in one sitting and ends with a test going
 green. Don't skip ahead: the tests build on each other, and a later one will
 fail for reasons that have nothing to do with what you just wrote.

@@ -78,10 +78,10 @@ pub async fn export_csv(
         return (StatusCode::FORBIDDEN, "not the host").into_response();
     }
 
-    // TODO(tyler): read the trade log out of SQLite rather than rebuilding it
-    // from memory — the point of persisting it is that the export survives a
-    // restart. See db.rs for the schema.
-    let body = "seq,ts,price,buyer,seller,aggressor,self_trade\n".to_string();
+    let body = match handle.export().await {
+        Some(csv) => csv,
+        None => return (StatusCode::GONE, "session ended").into_response(),
+    };
 
     (
         StatusCode::OK,

@@ -6,7 +6,7 @@
 //!
 //! Work through GUIDE.md in the repo root. It builds this up one step at a time.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 pub mod ids;
 pub use ids::{OrderId, PlayerId};
@@ -179,6 +179,9 @@ pub struct Market {
     /// Counter behind both order sequence numbers and trade sequence numbers.
     pub seq: u64,
     next_order_id: u64,
+    /// Where each live order sits, so cancel is a lookup rather than a scan of
+    /// every price level on both sides.
+    index: HashMap<OrderId, (Side, Price)>,
 }
 
 impl Market {
@@ -190,6 +193,7 @@ impl Market {
             positions: BTreeMap::new(),
             seq: 0,
             next_order_id: 0,
+            index: HashMap::new(),
         }
     }
 
@@ -201,9 +205,217 @@ impl Market {
 
     /// The one entry point.
     ///
-    /// The rules live in GUIDE.md, one stage at a time. Start at Stage 1.
-    pub fn apply(&mut self, _cmd: Command) -> Result<Vec<Event>, Reject> {
-        todo!("GUIDE.md, Stage 1, Step 1")
+    /// Deterministic: the same state plus the same command always produces the
+    /// same events. Nothing in here reads the clock or does I/O, which is what
+    /// makes a session replayable from its command log.
+    pub fn apply(&mut self, cmd: Command) -> Result<Vec<Event>, Reject> {
+        match cmd {
+            Command::AddPlayer { player } => {
+                self.positions.entry(player.clone()).or_default();
+                Ok(vec![Event::PlayerAdded { player }])
+            }
+            Command::SetPhase { phase } => {
+                self.phase = phase;
+                Ok(vec![Event::PhaseChanged { phase }])
+            }
+            Command::Settle { true_value } => {
+                self.phase = Phase::Settled;
+                Ok(vec![Event::Settled { true_value }])
+            }
+            Command::PlaceOrder { player, side, price } => self.place_order(player, side, price),
+            Command::CancelOrder { player, order } => self.cancel_order(player, order),
+            Command::Take { player, direction } => self.take(player, direction),
+        }
+    }
+
+    fn require_open(&self) -> Result<(), Reject> {
+        if self.phase == Phase::Open { Ok(()) } else { Err(Reject::NotOpen) }
+    }
+
+    fn require_player(&self, player: &PlayerId) -> Result<(), Reject> {
+        if self.positions.contains_key(player) { Ok(()) } else { Err(Reject::UnknownPlayer) }
+    }
+
+    /// The position limit counts orders that could still fill, not just the
+    /// position already taken on. `add_long` / `add_short` describe what the
+    /// command about to be applied would add to each side of that exposure.
+    ///
+    /// A resting bid and a buy both add one to potential length, so the same
+    /// check covers resting an order and crossing the spread.
+    fn would_breach(&self, player: &PlayerId, add_long: i64, add_short: i64) -> bool {
+        let net = self.positions.get(player).map_or(0, |p| p.net);
+        let limit = self.config.position_limit;
+        let potential_long = net + self.book.working(player, Side::Bid) + add_long;
+        let potential_short = -net + self.book.working(player, Side::Offer) + add_short;
+        potential_long > limit || potential_short > limit
+    }
+
+    fn level_mut(&mut self, side: Side, price: Price) -> &mut VecDeque<Order> {
+        let levels = match side {
+            Side::Bid => &mut self.book.bids,
+            Side::Offer => &mut self.book.offers,
+        };
+        levels.entry(price).or_default()
+    }
+
+    fn place_order(
+        &mut self,
+        player: PlayerId,
+        side: Side,
+        price: Price,
+    ) -> Result<Vec<Event>, Reject> {
+        self.require_open()?;
+        self.require_player(&player)?;
+
+        if price.0 <= 0 {
+            return Err(Reject::BadPrice);
+        }
+        if let Some(tick) = self.config.tick {
+            if tick.0 <= 0 || price.0 % tick.0 != 0 {
+                return Err(Reject::BadTick);
+            }
+        }
+
+        let (add_long, add_short) = match side {
+            Side::Bid => (1, 0),
+            Side::Offer => (0, 1),
+        };
+        if self.would_breach(&player, add_long, add_short) {
+            return Err(Reject::PositionLimit);
+        }
+
+        // A limit order that crosses trades instead of resting, at the resting
+        // order's price — so the aggressor gets the price improvement. Because
+        // every order is one lot it consumes exactly one resting order and is
+        // then used up, so it never rests and there is no partial fill.
+        let crosses = match side {
+            Side::Bid => self.book.best_offer().is_some_and(|o| price >= o.price),
+            Side::Offer => self.book.best_bid().is_some_and(|o| price <= o.price),
+        };
+        if crosses {
+            let direction = match side {
+                Side::Bid => Direction::Buy,
+                Side::Offer => Direction::Sell,
+            };
+            let trade = self.execute(&player, direction).ok_or(Reject::NoLiquidity)?;
+            return Ok(vec![Event::Traded { trade }]);
+        }
+
+        self.seq += 1;
+        let order = Order {
+            id: self.next_order_id(),
+            player,
+            side,
+            price,
+            seq: self.seq,
+        };
+        self.index.insert(order.id, (side, price));
+
+        // Clone for the event, because pushing into the book moves the order.
+        let event = Event::OrderAdded { order: order.clone() };
+        self.level_mut(side, price).push_back(order);
+        Ok(vec![event])
+    }
+
+    fn take(&mut self, player: PlayerId, direction: Direction) -> Result<Vec<Event>, Reject> {
+        self.require_open()?;
+        self.require_player(&player)?;
+
+        let available = match direction {
+            Direction::Buy => self.book.best_offer().is_some(),
+            Direction::Sell => self.book.best_bid().is_some(),
+        };
+        if !available {
+            return Err(Reject::NoLiquidity);
+        }
+
+        let (add_long, add_short) = match direction {
+            Direction::Buy => (1, 0),
+            Direction::Sell => (0, 1),
+        };
+        if self.would_breach(&player, add_long, add_short) {
+            return Err(Reject::PositionLimit);
+        }
+
+        let trade = self.execute(&player, direction).ok_or(Reject::NoLiquidity)?;
+        Ok(vec![Event::Traded { trade }])
+    }
+
+    /// Consume the best order on the far side and book the trade.
+    ///
+    /// Shared by `take` and by a crossing limit order, so the two can never
+    /// drift apart.
+    fn execute(&mut self, taker: &PlayerId, direction: Direction) -> Option<Trade> {
+        let (side, price) = match direction {
+            Direction::Buy => (Side::Offer, self.book.best_offer()?.price),
+            Direction::Sell => (Side::Bid, self.book.best_bid()?.price),
+        };
+
+        let levels = match side {
+            Side::Bid => &mut self.book.bids,
+            Side::Offer => &mut self.book.offers,
+        };
+        let queue = levels.get_mut(&price)?;
+        let resting = queue.pop_front()?;
+        // A price level left holding an empty queue would make best_bid() and
+        // best_offer() report an empty book, because they ask that level for a
+        // front order and get nothing.
+        if queue.is_empty() {
+            levels.remove(&price);
+        }
+        self.index.remove(&resting.id);
+
+        let (buyer, seller) = match direction {
+            Direction::Buy => (taker.clone(), resting.player.clone()),
+            Direction::Sell => (resting.player.clone(), taker.clone()),
+        };
+        let self_trade = buyer == seller;
+
+        // Both legs are applied even when they are the same player, so a
+        // self-trade nets to no position and no cash rather than being skipped.
+        let b = self.positions.entry(buyer.clone()).or_default();
+        b.net += 1;
+        b.cash -= price.0;
+        let s = self.positions.entry(seller.clone()).or_default();
+        s.net -= 1;
+        s.cash += price.0;
+
+        self.seq += 1;
+        Some(Trade {
+            seq: self.seq,
+            price,
+            buyer,
+            seller,
+            aggressor: direction,
+            resting_order: resting.id,
+            self_trade,
+        })
+    }
+
+    fn cancel_order(&mut self, player: PlayerId, order: OrderId) -> Result<Vec<Event>, Reject> {
+        self.require_open()?;
+
+        let (side, price) = *self.index.get(&order).ok_or(Reject::UnknownOrder)?;
+        let levels = match side {
+            Side::Bid => &mut self.book.bids,
+            Side::Offer => &mut self.book.offers,
+        };
+        let queue = levels.get_mut(&price).ok_or(Reject::UnknownOrder)?;
+        let at = queue.iter().position(|o| o.id == order).ok_or(Reject::UnknownOrder)?;
+
+        if queue[at].player != player {
+            return Err(Reject::NotYourOrder);
+        }
+
+        // `remove` shifts the rest along and keeps their order, so everyone
+        // behind the cancelled order keeps their place in the queue.
+        queue.remove(at);
+        if queue.is_empty() {
+            levels.remove(&price);
+        }
+        self.index.remove(&order);
+
+        Ok(vec![Event::OrderCancelled { order, player }])
     }
 
     /// Final score for one player: the cash they took in, plus whatever their

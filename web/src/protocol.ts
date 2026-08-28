@@ -103,7 +103,8 @@ export type RejectReason =
   | "bad_price"
   | "unknown_order"
   | "not_your_order"
-  | "not_host";
+  | "not_host"
+  | "unknown_player";
 
 /* ------------------------------------------------------------------ */
 /* Server -> client                                                    */

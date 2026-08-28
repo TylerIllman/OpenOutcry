@@ -9,14 +9,21 @@
 //! Fanout is a `broadcast` channel. Every connection subscribes; events that are
 //! private to one connection (rejections, snapshots) go back down that
 //! connection's own reply channel instead.
+//!
+//! Note there are two sequence counters, deliberately. `Market::seq` is queue
+//! priority inside the engine. `SessionActor::seq` is the browser's event
+//! stream. They answer different questions and must not be merged.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use engine::{Command, Market, Price, Reject};
 use rand::Rng;
+use rusqlite::Connection;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
-use crate::protocol::*;
+use crate::db;
+use crate::protocol::{self, *};
 
 /// Who is on the other end of a connection. The host does not trade.
 #[derive(Debug, Clone)]
@@ -44,6 +51,8 @@ pub enum Msg {
         token: String,
         reply: oneshot::Sender<Option<Player>>,
     },
+    /// Render the tape as CSV for the host's download.
+    Export(oneshot::Sender<String>),
 }
 
 pub struct SessionHandle {
@@ -71,6 +80,12 @@ impl SessionHandle {
         self.tx.send(Msg::Resolve { token, reply: tx }).await.ok()?;
         rx.await.ok().flatten()
     }
+
+    pub async fn export(&self) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Msg::Export(tx)).await.ok()?;
+        rx.await.ok()
+    }
 }
 
 #[derive(Clone)]
@@ -95,22 +110,49 @@ impl AppState {
         let (tx, rx) = mpsc::channel::<Msg>(256);
         let (events, _) = broadcast::channel::<ServerEvent>(1024);
 
+        let market = Market::new(engine::Config {
+            tick: req.tick_size.map(Price::from_f64),
+            position_limit: req.position_limit,
+        });
+
+        let meta = SessionMeta {
+            code: code.clone(),
+            question: req.question,
+            unit: req.unit,
+            tick_size: req.tick_size,
+            position_limit: req.position_limit,
+            phase: Phase::Lobby,
+        };
+
+        // Persistence is best-effort: if the database cannot be opened the game
+        // still runs, it just is not recoverable. Losing the round to a failed
+        // open would be a worse trade in a pub.
+        let db = db::open(&db_path())
+            .map_err(|e| tracing::warn!("sqlite unavailable, running without persistence: {e}"))
+            .ok();
+        if let Some(conn) = &db {
+            let _ = db::insert_session(
+                conn,
+                &meta.code,
+                &meta.question,
+                &meta.unit,
+                meta.tick_size,
+                meta.position_limit,
+                now_ms(),
+            );
+        }
+
         let actor = SessionActor {
-            meta: SessionMeta {
-                code: code.clone(),
-                question: req.question,
-                unit: req.unit,
-                tick_size: req.tick_size,
-                position_limit: req.position_limit,
-                phase: Phase::Lobby,
-            },
+            meta,
             players: Vec::new(),
+            names: HashMap::new(),
             tokens: HashMap::new(),
-            book: BookState::default(),
+            market,
             trades: Vec::new(),
             settlement: None,
             seq: 0,
             events: events.clone(),
+            db,
         };
 
         tokio::spawn(actor.run(rx));
@@ -119,6 +161,10 @@ impl AppState {
         self.sessions.lock().await.insert(code, handle.clone());
         handle
     }
+}
+
+fn db_path() -> String {
+    std::env::var("DB_PATH").unwrap_or_else(|_| "open_outcry.db".to_string())
 }
 
 /// Six characters from an alphabet with no 0/O/1/I, because these get read off a
@@ -132,13 +178,17 @@ fn generate_code() -> String {
 struct SessionActor {
     meta: SessionMeta,
     players: Vec<Player>,
+    /// player_id -> display name, so book and tape entries can carry names.
+    names: HashMap<String, String>,
     /// player_token -> player_id
     tokens: HashMap<String, String>,
-    book: BookState,
+    market: Market,
     trades: Vec<Trade>,
     settlement: Option<Settlement>,
+    /// Broadcast sequence. Separate from `market.seq`.
     seq: u64,
     events: broadcast::Sender<ServerEvent>,
+    db: Option<Connection>,
 }
 
 impl SessionActor {
@@ -157,25 +207,90 @@ impl SessionActor {
                     let _ = reply.send(found);
                 }
                 Msg::Join { name, reply } => {
-                    let player = Player {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name,
-                        joined_at: now_ms(),
-                    };
-                    let token = uuid::Uuid::new_v4().to_string();
-                    self.tokens.insert(token.clone(), player.id.clone());
-                    self.players.push(player.clone());
-
-                    self.seq += 1;
-                    let _ = self.events.send(ServerEvent::PlayerJoined {
-                        seq: self.seq,
-                        player: player.clone(),
-                    });
-                    let _ = reply.send((player.id, token));
+                    let (id, token) = self.add_player(name);
+                    let _ = reply.send((id, token));
+                }
+                Msg::Export(reply) => {
+                    let _ = reply.send(self.to_csv());
                 }
                 Msg::Cmd(env) => self.handle(env),
             }
         }
+    }
+
+    fn add_player(&mut self, name: String) -> (String, String) {
+        let player = Player {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.clone(),
+            joined_at: now_ms(),
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+
+        // The engine needs to know about the player before it will accept
+        // orders from them.
+        let _ = self.market.apply(Command::AddPlayer { player: engine::PlayerId(player.id.clone()) });
+
+        self.tokens.insert(token.clone(), player.id.clone());
+        self.names.insert(player.id.clone(), name);
+        self.players.push(player.clone());
+
+        if let Some(conn) = &self.db {
+            let _ = db::insert_player(conn, &self.meta.code, &player.id, &player.name, player.joined_at);
+        }
+
+        self.seq += 1;
+        let _ = self.events.send(ServerEvent::PlayerJoined { seq: self.seq, player: player.clone() });
+        (player.id, token)
+    }
+
+    fn name_of(&self, id: &str) -> String {
+        self.names.get(id).cloned().unwrap_or_else(|| "?".to_string())
+    }
+
+    fn to_wire_order(&self, o: &engine::Order) -> protocol::Order {
+        protocol::Order {
+            id: o.id.0.to_string(),
+            player_id: o.player.0.clone(),
+            player_name: self.name_of(&o.player.0),
+            side: match o.side {
+                engine::Side::Bid => Side::Bid,
+                engine::Side::Offer => Side::Offer,
+            },
+            price: o.price.to_f64(),
+            seq: o.seq,
+        }
+    }
+
+    /// Flatten the engine's book, best price first on each side. `BTreeMap`
+    /// iterates ascending, so bids are reversed and offers are not; within a
+    /// price level the queue is already in arrival order.
+    fn wire_book(&self) -> BookState {
+        BookState {
+            bids: self
+                .market
+                .book
+                .bids
+                .iter()
+                .rev()
+                .flat_map(|(_, q)| q.iter())
+                .map(|o| self.to_wire_order(o))
+                .collect(),
+            offers: self
+                .market
+                .book
+                .offers
+                .iter()
+                .flat_map(|(_, q)| q.iter())
+                .map(|o| self.to_wire_order(o))
+                .collect(),
+        }
+    }
+
+    fn position_of(&self, player_id: &str) -> i64 {
+        self.market
+            .positions
+            .get(&engine::PlayerId(player_id.to_string()))
+            .map_or(0, |p| p.net)
     }
 
     fn snapshot(&self, who: &Who) -> ServerEvent {
@@ -183,16 +298,14 @@ impl SessionActor {
             seq: self.seq,
             session: self.meta.clone(),
             players: self.players.clone(),
-            book: self.book.clone(),
+            book: self.wire_book(),
             trades: self.trades.clone(),
             you: match who {
                 Who::Host => None,
                 Who::Player { id, name } => Some(YouState {
                     player_id: id.clone(),
                     name: name.clone(),
-                    // Position is derivable from the tape, but the server stays
-                    // authoritative because it also enforces the limit.
-                    position: position_of(&self.trades, id),
+                    position: self.position_of(id),
                 }),
             },
             settlement: self.settlement.clone(),
@@ -202,12 +315,11 @@ impl SessionActor {
     fn handle(&mut self, env: Envelope) {
         let is_host = matches!(env.who, Who::Host);
 
-        match env.cmd {
+        match &env.cmd {
             ClientCommand::Resync { .. } => {
                 let _ = env.reply.send(self.snapshot(&env.who));
             }
 
-            // -- host controls -------------------------------------------------
             ClientCommand::OpenTrading | ClientCommand::CloseTrading | ClientCommand::Settle { .. }
                 if !is_host =>
             {
@@ -218,78 +330,257 @@ impl SessionActor {
             }
             ClientCommand::OpenTrading => self.set_phase(Phase::Open),
             ClientCommand::CloseTrading => self.set_phase(Phase::Closed),
-            ClientCommand::Settle { true_value } => {
-                // TODO(tyler): once the engine exists, compute real results from
-                // Market::settle_pnl for every player. Cash and position come
-                // from the engine, not from replaying the tape here.
-                self.meta.phase = Phase::Settled;
-                let results: Vec<Result> = self
-                    .players
-                    .iter()
-                    .map(|p| {
-                        let position = position_of(&self.trades, &p.id);
-                        let cash = cash_of(&self.trades, &p.id);
-                        Result {
-                            player_id: p.id.clone(),
-                            name: p.name.clone(),
-                            position,
-                            cash,
-                            pnl: cash + position as f64 * true_value,
-                        }
-                    })
-                    .collect();
+            ClientCommand::Settle { true_value } => self.settle(*true_value),
 
-                self.settlement = Some(Settlement { true_value, results: results.clone() });
-                self.seq += 1;
-                let _ = self.events.send(ServerEvent::Settled {
-                    seq: self.seq,
-                    true_value,
-                    results,
-                });
-            }
-
-            // -- trading -------------------------------------------------------
             ClientCommand::PlaceOrder { .. }
             | ClientCommand::CancelOrder { .. }
             | ClientCommand::Take { .. } => {
-                if is_host {
+                let Who::Player { id, .. } = &env.who else {
                     let _ = env.reply.send(ServerEvent::Rejected {
                         reason: RejectReason::NotHost,
                         message: "The host does not trade".into(),
                     });
                     return;
-                }
-                // TODO(tyler): this is the seam. Translate the wire command into
-                // an `engine::Command`, call `market.apply(...)`, then map the
-                // returned `Vec<engine::Event>` onto ServerEvents and broadcast
-                // them with fresh sequence numbers. Reject maps 1:1 onto
-                // RejectReason.
-                let _ = env.reply.send(ServerEvent::Rejected {
-                    reason: RejectReason::NotOpen,
-                    message: "Matching engine not implemented yet".into(),
-                });
+                };
+                let player = engine::PlayerId(id.clone());
+                let cmd = match self.to_engine_command(&player, &env.cmd) {
+                    Some(cmd) => cmd,
+                    None => {
+                        let _ = env.reply.send(ServerEvent::Error {
+                            message: "unrecognised order".into(),
+                        });
+                        return;
+                    }
+                };
+                self.run_engine(cmd, Some(id.clone()), &env)
             }
         }
     }
 
-    fn set_phase(&mut self, phase: Phase) {
-        self.meta.phase = phase;
+    fn to_engine_command(&self, player: &engine::PlayerId, cmd: &ClientCommand) -> Option<Command> {
+        Some(match cmd {
+            ClientCommand::PlaceOrder { side, price } => Command::PlaceOrder {
+                player: player.clone(),
+                side: match side {
+                    Side::Bid => engine::Side::Bid,
+                    Side::Offer => engine::Side::Offer,
+                },
+                price: Price::from_f64(*price),
+            },
+            ClientCommand::CancelOrder { order_id } => Command::CancelOrder {
+                player: player.clone(),
+                order: engine::OrderId(order_id.parse().ok()?),
+            },
+            ClientCommand::Take { direction } => Command::Take {
+                player: player.clone(),
+                direction: match direction {
+                    Direction::Buy => engine::Direction::Buy,
+                    Direction::Sell => engine::Direction::Sell,
+                },
+            },
+            _ => return None,
+        })
+    }
+
+    /// Run a command through the engine, then broadcast whatever it produced.
+    ///
+    /// The engine decides *what* happened; the actor decides what the room is
+    /// told and in what order. Rejections go back to the one player who caused
+    /// them, never to the room.
+    fn run_engine(&mut self, cmd: Command, actor: Option<String>, env: &Envelope) {
+        match self.market.apply(cmd.clone()) {
+            Err(reject) => {
+                let (reason, message) = describe(reject);
+                let _ = env.reply.send(ServerEvent::Rejected { reason, message: message.into() });
+            }
+            Ok(events) => {
+                self.persist_command(&env.cmd, actor.as_deref());
+                for ev in events {
+                    self.publish(ev);
+                }
+            }
+        }
+    }
+
+    /// Turn one engine event into one broadcast event, stamped with the next
+    /// sequence number.
+    fn publish(&mut self, ev: engine::Event) {
         self.seq += 1;
-        let _ = self.events.send(ServerEvent::PhaseChanged { seq: self.seq, phase });
+        let seq = self.seq;
+
+        let out = match ev {
+            engine::Event::OrderAdded { order } => {
+                ServerEvent::OrderAdded { seq, order: self.to_wire_order(&order) }
+            }
+            engine::Event::OrderCancelled { order, player } => ServerEvent::OrderCancelled {
+                seq,
+                order_id: order.0.to_string(),
+                player_id: player.0,
+            },
+            engine::Event::Traded { trade } => {
+                let wire = Trade {
+                    id: format!("{}-{}", self.meta.code, trade.seq),
+                    seq,
+                    price: trade.price.to_f64(),
+                    buyer_id: trade.buyer.0.clone(),
+                    buyer_name: self.name_of(&trade.buyer.0),
+                    seller_id: trade.seller.0.clone(),
+                    seller_name: self.name_of(&trade.seller.0),
+                    aggressor: match trade.aggressor {
+                        engine::Direction::Buy => Direction::Buy,
+                        engine::Direction::Sell => Direction::Sell,
+                    },
+                    self_trade: trade.self_trade,
+                    ts: now_ms(),
+                };
+                self.trades.push(wire.clone());
+                if let Some(conn) = &self.db {
+                    let _ = db::insert_trade(
+                        conn,
+                        &self.meta.code,
+                        &wire.id,
+                        seq,
+                        wire.price,
+                        &wire.buyer_id,
+                        &wire.seller_id,
+                        match wire.aggressor {
+                            Direction::Buy => "buy",
+                            Direction::Sell => "sell",
+                        },
+                        wire.self_trade,
+                        wire.ts,
+                    );
+                }
+                ServerEvent::Trade {
+                    seq,
+                    trade: wire,
+                    resting_order_id: trade.resting_order.0.to_string(),
+                }
+            }
+            engine::Event::PhaseChanged { phase } => {
+                let p = wire_phase(phase);
+                self.meta.phase = p;
+                ServerEvent::PhaseChanged { seq, phase: p }
+            }
+            // Settlement is broadcast by `settle`, which has the results.
+            engine::Event::Settled { .. } | engine::Event::PlayerAdded { .. } => return,
+        };
+
+        let _ = self.events.send(out);
+    }
+
+    fn set_phase(&mut self, phase: Phase) {
+        let engine_phase = match phase {
+            Phase::Lobby => engine::Phase::Lobby,
+            Phase::Open => engine::Phase::Open,
+            Phase::Closed => engine::Phase::Closed,
+            Phase::Settled => engine::Phase::Settled,
+        };
+        if let Ok(events) = self.market.apply(Command::SetPhase { phase: engine_phase }) {
+            if let Some(conn) = &self.db {
+                let _ = db::set_phase(conn, &self.meta.code, phase_name(phase));
+            }
+            for ev in events {
+                self.publish(ev);
+            }
+        }
+    }
+
+    fn settle(&mut self, true_value: f64) {
+        let tv = Price::from_f64(true_value);
+        let _ = self.market.apply(Command::Settle { true_value: tv });
+        self.meta.phase = Phase::Settled;
+
+        let results: Vec<protocol::Result> = self
+            .players
+            .iter()
+            .map(|p| {
+                let id = engine::PlayerId(p.id.clone());
+                let pos = self.market.positions.get(&id).cloned().unwrap_or_default();
+                protocol::Result {
+                    player_id: p.id.clone(),
+                    name: p.name.clone(),
+                    position: pos.net,
+                    cash: pos.cash as f64 / Price::SCALE as f64,
+                    pnl: self.market.settle_pnl(&id, tv) as f64 / Price::SCALE as f64,
+                }
+            })
+            .collect();
+
+        self.settlement = Some(Settlement { true_value, results: results.clone() });
+        if let Some(conn) = &self.db {
+            let _ = db::set_settlement(conn, &self.meta.code, true_value);
+        }
+
+        self.seq += 1;
+        let _ = self.events.send(ServerEvent::Settled { seq: self.seq, true_value, results });
+    }
+
+    fn persist_command(&self, cmd: &ClientCommand, player_id: Option<&str>) {
+        let Some(conn) = &self.db else { return };
+        let Ok(payload) = serde_json::to_string(cmd) else { return };
+        let _ = db::append_command(conn, &self.meta.code, self.market.seq, player_id, &payload, now_ms());
+    }
+
+    fn to_csv(&self) -> String {
+        let mut out = String::from("seq,ts,price,buyer,seller,aggressor,self_trade\n");
+        for t in &self.trades {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                t.seq,
+                t.ts,
+                t.price,
+                csv_escape(&t.buyer_name),
+                csv_escape(&t.seller_name),
+                match t.aggressor {
+                    Direction::Buy => "buy",
+                    Direction::Sell => "sell",
+                },
+                t.self_trade
+            ));
+        }
+        out
     }
 }
 
-fn position_of(trades: &[Trade], player_id: &str) -> i64 {
-    trades.iter().fold(0, |acc, t| {
-        acc + (t.buyer_id == player_id) as i64 - (t.seller_id == player_id) as i64
-    })
+fn csv_escape(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
-fn cash_of(trades: &[Trade], player_id: &str) -> f64 {
-    trades.iter().fold(0.0, |acc, t| {
-        acc + if t.seller_id == player_id { t.price } else { 0.0 }
-            - if t.buyer_id == player_id { t.price } else { 0.0 }
-    })
+fn wire_phase(p: engine::Phase) -> Phase {
+    match p {
+        engine::Phase::Lobby => Phase::Lobby,
+        engine::Phase::Open => Phase::Open,
+        engine::Phase::Closed => Phase::Closed,
+        engine::Phase::Settled => Phase::Settled,
+    }
+}
+
+fn phase_name(p: Phase) -> &'static str {
+    match p {
+        Phase::Lobby => "lobby",
+        Phase::Open => "open",
+        Phase::Closed => "closed",
+        Phase::Settled => "settled",
+    }
+}
+
+/// Engine rejections, in words a player in a pub can act on.
+fn describe(r: Reject) -> (RejectReason, &'static str) {
+    match r {
+        Reject::PositionLimit => (RejectReason::PositionLimit, "Position limit reached"),
+        Reject::NotOpen => (RejectReason::NotOpen, "Trading is not open"),
+        Reject::NoLiquidity => (RejectReason::NoLiquidity, "Nothing to trade against"),
+        Reject::BadTick => (RejectReason::BadTick, "Price is not on the tick"),
+        Reject::BadPrice => (RejectReason::BadPrice, "That is not a valid price"),
+        Reject::UnknownOrder => (RejectReason::UnknownOrder, "That order is already gone"),
+        Reject::NotYourOrder => (RejectReason::NotYourOrder, "That is not your order"),
+        Reject::UnknownPlayer => (RejectReason::UnknownPlayer, "You are not in this session"),
+    }
 }
 
 pub fn now_ms() -> i64 {

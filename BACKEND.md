@@ -72,33 +72,39 @@ The client tracks `seq` and sends `resync` on a gap. `ws.rs` treats a broadcast
 
 ## What works today
 
-Verified end to end against the running server:
+The whole game. Verified end to end against the running server, not just
+compiled:
 
-- Create session, join, QR, roster updating live over the socket
-- `openTrading` / `closeTrading` / `settle` and the phase transitions
-- Settlement computes results and the leaderboard renders
-- A player is refused host commands (`not_host`)
-- The host is refused a trade (`not_host`, "The host does not trade")
-- Orders come back `rejected` with "Matching engine not implemented yet"
+- Create a session, join by QR, roster updating live over the socket
+- Resting orders, with names on both sides of the book
+- **MINE / YOURS** taking the best price on the far side
+- **Crossing limit orders** trading at the resting price — a bid of 60 into an
+  offer at 47 prints at 47, and never rests
+- **Price-then-time priority**, including after a mid-queue cancel
+- **Cancel**, with ownership and unknown-order checks
+- **Position limit** counting working orders, freeing headroom when you pull
+- **Self-trades**, allowed and tagged `self` on the tape
+- **Tick and price validation**, rejected back to the one player who tried it
+- **Settlement** from real engine positions, leaderboard sorted by P&L, zero-sum
+- **CSV export** of the tape
+- **SQLite persistence** of session, players, the command log and every trade
 
-## What is stubbed
+Engine tests: `cargo test -p engine` — 20 passing.
 
-1. **`Market::apply` is `todo!()`.** Nothing matches. This is the seam.
-2. **The actor does not call the engine.** `state.rs` `handle()` has the
-   `PlaceOrder | CancelOrder | Take` arm returning a rejection. Wiring it up
-   means: translate the wire command into an `engine::Command`, call
-   `market.apply`, map `Vec<engine::Event>` onto `ServerEvent`s with fresh
-   sequence numbers, broadcast. `Reject` maps 1:1 onto `RejectReason`.
-3. **Settlement recomputes from the tape** rather than reading the engine's
-   position and cash. Once the engine exists, use `Market::settle_pnl`.
-4. **SQLite is not wired.** `db.rs` has the schema. The actor should append to
-   `command_log` before broadcasting, so a crash loses the broadcast but never
-   the command.
-5. **CSV export returns a header row only.**
-6. **No session eviction.** Abandoned sessions leak. Needs an idle sweep.
-7. **No rate limit** on session creation.
-8. **`ts-rs` is not set up.** `protocol.rs` and `protocol.ts` are hand-synced,
+## What is left
+
+1. **No session eviction.** Sessions live in memory until the process restarts,
+   so abandoned ones leak. A few KB each, so it will not bite you at a party,
+   but it should be swept before this runs publicly for weeks.
+2. **Replay is written but not read.** Every accepted command is in
+   `command_log`; nothing feeds it back through the engine yet. That is a short
+   function plus a test asserting the replayed state is identical — and it is
+   the most trading-firm-legible thing left to do.
+3. **`ts-rs` is not set up.** `protocol.rs` and `protocol.ts` are hand-synced,
    which will drift. Add `#[derive(TS)]` and generate the TS in `cargo test`.
+4. **No property tests or benchmarks.** See Stage 5 of GUIDE.md.
+5. **Export reads memory, not SQLite**, so it dies with the session. Fine while
+   sessions are in-memory anyway; revisit if sessions ever become durable.
 
 ## Decisions I had to make to write this — confirm or change
 

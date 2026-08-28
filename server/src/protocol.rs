@@ -117,6 +117,7 @@ pub enum RejectReason {
     UnknownOrder,
     NotYourOrder,
     NotHost,
+    UnknownPlayer,
 }
 
 /// Server -> client. Internally tagged on `t` to match the TS discriminated union.
@@ -152,7 +153,7 @@ pub enum ServerEvent {
 }
 
 /// Client -> server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum ClientCommand {
     #[serde(rename_all = "camelCase")]
