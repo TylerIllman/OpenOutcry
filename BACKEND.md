@@ -6,19 +6,24 @@ What exists, what's stubbed, and exactly which front-end call hits which endpoin
 
 ```
 Cargo.toml              workspace: engine + server
-engine/                 YOURS. Pure matching engine, no I/O, no async, no clock.
-  src/lib.rs            types, Book, Market::apply  <- the seam, currently todo!()
+engine/                 Pure matching engine. No I/O, no async, no clock.
+  src/lib.rs            types, Book, Market::apply
   src/ids.rs            OrderId / PlayerId newtypes
-  tests/rules.rs        20 failing tests. This is the spec. Make them green.
-server/                 MINE. Plumbing around the engine.
+  tests/rules.rs        20 rule tests. This is the spec.
+  tests/properties.rs   invariants, over 1,600 random command sequences
+  benches/matching.rs   criterion benchmarks
+server/                 Plumbing around the engine.
   src/main.rs           axum router, static file serving, PORT/STATIC_DIR env
   src/protocol.rs       wire types, mirrors web/src/protocol.ts
   src/state.rs          session registry + the per-session actor
   src/http.rs           the four REST endpoints
   src/ws.rs             websocket upgrade, auth, fanout
-  src/db.rs             SQLite schema (written, not yet wired)
+  src/db.rs             SQLite schema and writes
+  src/replay.rs         rebuild a market from the command log
+  src/translate.rs      wire commands -> engine commands, shared with replay
 web/                    front end, built to web/dist and served by the binary
-  src/protocol.ts       wire types, mirrors server/src/protocol.rs
+  src/generated/        TypeScript GENERATED from the Rust by ts-rs — do not edit
+  src/protocol.ts       re-exports ./generated plus the helpers
   src/api.ts            the four REST calls
   src/useSession.ts     socket + reducer that applies sequenced events
   src/routes/           Landing, CreateSession, Join, HostSession, PlayerSession
@@ -42,7 +47,8 @@ For front-end work, `cd web && npm run dev` proxies `/api` and `/ws` to 8080.
 | `POST` | `/api/sessions` | `CreateSession.tsx` via `api.createSession` | Create a market. Returns `{ code, hostToken }`. Host token goes straight into localStorage. |
 | `GET` | `/api/sessions/:code` | `Join.tsx` via `api.getSession` | Public metadata so the join screen can show the question before you commit a name. |
 | `POST` | `/api/sessions/:code/join` | `Join.tsx` via `api.joinSession` | Claim a seat. Returns `{ playerId, playerToken }`. |
-| `GET` | `/api/sessions/:code/export.csv?hostToken=` | `HostSession.tsx` via `api.exportUrl` | Tape + final book. **Stubbed — returns headers only.** |
+| `GET` | `/api/sessions/:code/export.csv?hostToken=` | `HostSession.tsx` via `api.exportUrl` | The tape as CSV, read from SQLite. |
+| `GET` | `/api/sessions/:code/verify?hostToken=` | not called by the UI | Replays the command log and compares it against live state. |
 
 Everything after connect happens on the socket. That is deliberate: the host
 already holds one, and routing commands through a single ordered channel is what
@@ -93,18 +99,27 @@ Engine tests: `cargo test -p engine` — 20 passing.
 
 ## What is left
 
-1. **No session eviction.** Sessions live in memory until the process restarts,
-   so abandoned ones leak. A few KB each, so it will not bite you at a party,
-   but it should be swept before this runs publicly for weeks.
-2. **Replay is written but not read.** Every accepted command is in
-   `command_log`; nothing feeds it back through the engine yet. That is a short
-   function plus a test asserting the replayed state is identical — and it is
-   the most trading-firm-legible thing left to do.
-3. **`ts-rs` is not set up.** `protocol.rs` and `protocol.ts` are hand-synced,
-   which will drift. Add `#[derive(TS)]` and generate the TS in `cargo test`.
-4. **No property tests or benchmarks.** See Stage 5 of GUIDE.md.
-5. **Export reads memory, not SQLite**, so it dies with the session. Fine while
-   sessions are in-memory anyway; revisit if sessions ever become durable.
+One thing, and it is a deliberate omission rather than an unfinished edge:
+
+**Sessions do not survive a process restart.** The registry is in memory, so a
+redeploy ends every game in progress. Everything needed to fix it exists —
+`replay::replay` rebuilds a market from the command log — but restoring sessions
+on boot would also mean restoring host and player tokens, and a game whose room
+has gone home should not come back. For a party game the honest behaviour is to
+lose it; if this ever needs to survive deploys, replay is the way in.
+
+Idle sessions *are* swept: `AppState::evict_idle` runs every five minutes and
+drops anything untouched for `SESSION_TTL_MS` (default six hours). Dropping the
+handle closes the channel, so the actor task exits on its own.
+
+## Environment
+
+| | |
+|---|---|
+| `PORT` | default `8080` |
+| `STATIC_DIR` | default `web/dist` |
+| `DB_PATH` | default `open_outcry.db` |
+| `SESSION_TTL_MS` | default six hours |
 
 ## Decisions I had to make to write this — confirm or change
 

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use engine::{Command, Market, Price, Reject};
 use rand::Rng;
@@ -23,6 +24,7 @@ use rusqlite::Connection;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 use crate::db;
+use crate::translate::to_engine_command;
 use crate::protocol::{self, *};
 
 /// Who is on the other end of a connection. The host does not trade.
@@ -53,6 +55,9 @@ pub enum Msg {
     },
     /// Render the tape as CSV for the host's download.
     Export(oneshot::Sender<String>),
+    /// A stable description of live market state, for checking it against a
+    /// replay of the command log.
+    Fingerprint(oneshot::Sender<String>),
 }
 
 pub struct SessionHandle {
@@ -60,9 +65,21 @@ pub struct SessionHandle {
     pub host_token: String,
     pub tx: mpsc::Sender<Msg>,
     pub events: broadcast::Sender<ServerEvent>,
+    /// Epoch millis of the last thing anyone did here. Read by the idle sweeper
+    /// without going near the actor, so a wedged session can still be reaped.
+    last_activity: AtomicI64,
 }
 
 impl SessionHandle {
+    /// Record that something happened. Call this on every inbound command.
+    pub fn touch(&self) {
+        self.last_activity.store(now_ms(), Ordering::Relaxed);
+    }
+
+    pub fn idle_ms(&self) -> i64 {
+        now_ms() - self.last_activity.load(Ordering::Relaxed)
+    }
+
     pub async fn meta(&self) -> Option<SessionMeta> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Msg::Meta(tx)).await.ok()?;
@@ -84,6 +101,12 @@ impl SessionHandle {
     pub async fn export(&self) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Msg::Export(tx)).await.ok()?;
+        rx.await.ok()
+    }
+
+    pub async fn fingerprint(&self) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Msg::Fingerprint(tx)).await.ok()?;
         rx.await.ok()
     }
 }
@@ -151,19 +174,41 @@ impl AppState {
             trades: Vec::new(),
             settlement: None,
             seq: 0,
+            log_seq: 0,
             events: events.clone(),
             db,
         };
 
         tokio::spawn(actor.run(rx));
 
-        let handle = Arc::new(SessionHandle { code: code.clone(), host_token, tx, events });
+        let handle = Arc::new(SessionHandle {
+            code: code.clone(),
+            host_token,
+            tx,
+            events,
+            last_activity: AtomicI64::new(now_ms()),
+        });
         self.sessions.lock().await.insert(code, handle.clone());
         handle
     }
 }
 
-fn db_path() -> String {
+impl AppState {
+    /// Drop sessions nobody has touched for `ttl_ms`.
+    ///
+    /// Dropping the handle drops the only `mpsc::Sender`, so the actor's
+    /// `recv()` returns `None` and the task exits on its own. Live connections
+    /// hold their own `Arc`, so a session with anyone still attached survives
+    /// until they leave.
+    pub async fn evict_idle(&self, ttl_ms: i64) -> usize {
+        let mut sessions = self.sessions.lock().await;
+        let before = sessions.len();
+        sessions.retain(|_, h| h.idle_ms() < ttl_ms);
+        before - sessions.len()
+    }
+}
+
+pub fn db_path() -> String {
     std::env::var("DB_PATH").unwrap_or_else(|_| "open_outcry.db".to_string())
 }
 
@@ -187,6 +232,9 @@ struct SessionActor {
     settlement: Option<Settlement>,
     /// Broadcast sequence. Separate from `market.seq`.
     seq: u64,
+    /// Command-log sequence. Also separate: `market.seq` does not advance on a
+    /// cancel or a phase change, so using it as the log's key would collide.
+    log_seq: u64,
     events: broadcast::Sender<ServerEvent>,
     db: Option<Connection>,
 }
@@ -212,6 +260,9 @@ impl SessionActor {
                 }
                 Msg::Export(reply) => {
                     let _ = reply.send(self.to_csv());
+                }
+                Msg::Fingerprint(reply) => {
+                    let _ = reply.send(self.market.fingerprint());
                 }
                 Msg::Cmd(env) => self.handle(env),
             }
@@ -328,9 +379,20 @@ impl SessionActor {
                     message: "Only the host can do that".into(),
                 });
             }
-            ClientCommand::OpenTrading => self.set_phase(Phase::Open),
-            ClientCommand::CloseTrading => self.set_phase(Phase::Closed),
-            ClientCommand::Settle { true_value } => self.settle(*true_value),
+            ClientCommand::OpenTrading => {
+                if self.set_phase(Phase::Open) {
+                    self.persist_command(&env.cmd, None);
+                }
+            }
+            ClientCommand::CloseTrading => {
+                if self.set_phase(Phase::Closed) {
+                    self.persist_command(&env.cmd, None);
+                }
+            }
+            ClientCommand::Settle { true_value } => {
+                self.settle(*true_value);
+                self.persist_command(&env.cmd, None);
+            }
 
             ClientCommand::PlaceOrder { .. }
             | ClientCommand::CancelOrder { .. }
@@ -342,8 +404,7 @@ impl SessionActor {
                     });
                     return;
                 };
-                let player = engine::PlayerId(id.clone());
-                let cmd = match self.to_engine_command(&player, &env.cmd) {
+                let cmd = match to_engine_command(Some(id), &env.cmd) {
                     Some(cmd) => cmd,
                     None => {
                         let _ = env.reply.send(ServerEvent::Error {
@@ -355,31 +416,6 @@ impl SessionActor {
                 self.run_engine(cmd, Some(id.clone()), &env)
             }
         }
-    }
-
-    fn to_engine_command(&self, player: &engine::PlayerId, cmd: &ClientCommand) -> Option<Command> {
-        Some(match cmd {
-            ClientCommand::PlaceOrder { side, price } => Command::PlaceOrder {
-                player: player.clone(),
-                side: match side {
-                    Side::Bid => engine::Side::Bid,
-                    Side::Offer => engine::Side::Offer,
-                },
-                price: Price::from_f64(*price),
-            },
-            ClientCommand::CancelOrder { order_id } => Command::CancelOrder {
-                player: player.clone(),
-                order: engine::OrderId(order_id.parse().ok()?),
-            },
-            ClientCommand::Take { direction } => Command::Take {
-                player: player.clone(),
-                direction: match direction {
-                    Direction::Buy => engine::Direction::Buy,
-                    Direction::Sell => engine::Direction::Sell,
-                },
-            },
-            _ => return None,
-        })
     }
 
     /// Run a command through the engine, then broadcast whatever it produced.
@@ -469,21 +505,24 @@ impl SessionActor {
         let _ = self.events.send(out);
     }
 
-    fn set_phase(&mut self, phase: Phase) {
+    /// Returns whether the engine accepted the transition.
+    fn set_phase(&mut self, phase: Phase) -> bool {
         let engine_phase = match phase {
             Phase::Lobby => engine::Phase::Lobby,
             Phase::Open => engine::Phase::Open,
             Phase::Closed => engine::Phase::Closed,
             Phase::Settled => engine::Phase::Settled,
         };
-        if let Ok(events) = self.market.apply(Command::SetPhase { phase: engine_phase }) {
-            if let Some(conn) = &self.db {
-                let _ = db::set_phase(conn, &self.meta.code, phase_name(phase));
-            }
-            for ev in events {
-                self.publish(ev);
-            }
+        let Ok(events) = self.market.apply(Command::SetPhase { phase: engine_phase }) else {
+            return false;
+        };
+        if let Some(conn) = &self.db {
+            let _ = db::set_phase(conn, &self.meta.code, phase_name(phase));
         }
+        for ev in events {
+            self.publish(ev);
+        }
+        true
     }
 
     fn settle(&mut self, true_value: f64) {
@@ -516,10 +555,16 @@ impl SessionActor {
         let _ = self.events.send(ServerEvent::Settled { seq: self.seq, true_value, results });
     }
 
-    fn persist_command(&self, cmd: &ClientCommand, player_id: Option<&str>) {
+    /// Append an accepted command to the replay log.
+    ///
+    /// Only accepted commands go in. A rejected command changed nothing, so
+    /// replaying it would be replaying a decision the engine already made.
+    fn persist_command(&mut self, cmd: &ClientCommand, player_id: Option<&str>) {
+        self.log_seq += 1;
         let Some(conn) = &self.db else { return };
         let Ok(payload) = serde_json::to_string(cmd) else { return };
-        let _ = db::append_command(conn, &self.meta.code, self.market.seq, player_id, &payload, now_ms());
+        let _ =
+            db::append_command(conn, &self.meta.code, self.log_seq, player_id, &payload, now_ms());
     }
 
     fn to_csv(&self) -> String {

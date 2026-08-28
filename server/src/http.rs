@@ -6,7 +6,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::protocol::*;
-use crate::state::AppState;
+use crate::state::{AppState, db_path};
+use crate::{db, replay};
 
 /// POST /api/sessions
 pub async fn create_session(
@@ -78,9 +79,32 @@ pub async fn export_csv(
         return (StatusCode::FORBIDDEN, "not the host").into_response();
     }
 
-    let body = match handle.export().await {
+    // Prefer the database: it is the durable record and it outlives the
+    // session's in-memory copy. Fall back to the actor when there is no
+    // database, so the export still works with persistence unavailable.
+    let body = db::open(&db_path())
+        .and_then(|conn| db::read_trades(&conn, &handle.code))
+        .ok()
+        .filter(|rows| !rows.is_empty())
+        .map(|rows| {
+            let mut out = String::from("seq,ts,price,buyer,seller,aggressor,self_trade\n");
+            for t in rows {
+                out.push_str(&format!(
+                    "{},{},{},{},{},{},{}\n",
+                    t.seq, t.ts, t.price,
+                    csv_escape(&t.buyer), csv_escape(&t.seller),
+                    t.aggressor, t.self_trade
+                ));
+            }
+            out
+        });
+
+    let body = match body {
         Some(csv) => csv,
-        None => return (StatusCode::GONE, "session ended").into_response(),
+        None => match handle.export().await {
+            Some(csv) => csv,
+            None => return (StatusCode::GONE, "session ended").into_response(),
+        },
     };
 
     (
@@ -92,4 +116,48 @@ pub async fn export_csv(
         body,
     )
         .into_response()
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// GET /api/sessions/:code/verify?hostToken=
+///
+/// Replays the session from its command log and compares the result against
+/// live state. This is the payoff for keeping the engine pure: if these ever
+/// disagree, something non-deterministic has got into it.
+pub async fn verify(
+    State(app): State<AppState>,
+    Path(code): Path<String>,
+    Query(q): Query<ExportQuery>,
+) -> impl IntoResponse {
+    let Some(handle) = app.get(&code).await else {
+        return (StatusCode::NOT_FOUND, "no such session").into_response();
+    };
+    if q.host_token != handle.host_token {
+        return (StatusCode::FORBIDDEN, "not the host").into_response();
+    }
+
+    let Some(live) = handle.fingerprint().await else {
+        return (StatusCode::GONE, "session ended").into_response();
+    };
+
+    let replayed = match db::open(&db_path()).and_then(|conn| replay::replay(&conn, &handle.code)) {
+        Ok(market) => market.fingerprint(),
+        Err(e) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, format!("replay failed: {e}")).into_response();
+        }
+    };
+
+    Json(serde_json::json!({
+        "matches": live == replayed,
+        "live": live,
+        "replayed": replayed,
+    }))
+    .into_response()
 }

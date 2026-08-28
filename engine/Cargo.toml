@@ -3,9 +3,18 @@ name = "engine"
 edition.workspace = true
 version.workspace = true
 
+# Without this the lib's default test harness is also run as a bench, and it
+# rejects criterion's command-line flags.
+[lib]
+bench = false
+
 [dependencies]
 serde = { workspace = true }
 
 [dev-dependencies]
-# Property-based tests over the book invariants. See tests/rules.rs.
-# proptest = "1"
+criterion = "0.5"
+proptest = "1"
+
+[[bench]]
+name = "matching"
+harness = false

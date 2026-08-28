@@ -120,6 +120,13 @@ pub struct Position {
     pub net: i64,
     /// Money in: sum of what they sold for, minus what they paid. In millionths.
     pub cash: i64,
+    /// Live bids this player has resting. Maintained incrementally, because the
+    /// risk check runs on every order and counting them by walking the book
+    /// makes order entry O(depth). `Book::working` is the same number computed
+    /// the slow way, and the property tests check the two agree.
+    pub working_bids: i64,
+    /// Live offers this player has resting. See `working_bids`.
+    pub working_offers: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -159,8 +166,12 @@ impl Book {
         self.offers.values().next()?.front()
     }
 
-    /// How many orders this player has resting on one side. The position limit
-    /// uses this, because an order that could still fill is exposure.
+    /// How many orders this player has resting on one side, counted by walking
+    /// the book.
+    ///
+    /// This is O(depth) and deliberately not used on the hot path — the risk
+    /// check reads the counters cached on `Position` instead. This exists as
+    /// the slow, obviously-correct version those counters are tested against.
     pub fn working(&self, player: &PlayerId, side: Side) -> i64 {
         let levels = match side {
             Side::Bid => &self.bids,
@@ -243,10 +254,10 @@ impl Market {
     /// A resting bid and a buy both add one to potential length, so the same
     /// check covers resting an order and crossing the spread.
     fn would_breach(&self, player: &PlayerId, add_long: i64, add_short: i64) -> bool {
-        let net = self.positions.get(player).map_or(0, |p| p.net);
+        let pos = self.positions.get(player).cloned().unwrap_or_default();
         let limit = self.config.position_limit;
-        let potential_long = net + self.book.working(player, Side::Bid) + add_long;
-        let potential_short = -net + self.book.working(player, Side::Offer) + add_short;
+        let potential_long = pos.net + pos.working_bids + add_long;
+        let potential_short = -pos.net + pos.working_offers + add_short;
         potential_long > limit || potential_short > limit
     }
 
@@ -310,6 +321,7 @@ impl Market {
             seq: self.seq,
         };
         self.index.insert(order.id, (side, price));
+        self.bump_working(&order.player, side, 1);
 
         // Clone for the event, because pushing into the book moves the order.
         let event = Event::OrderAdded { order: order.clone() };
@@ -345,6 +357,15 @@ impl Market {
     ///
     /// Shared by `take` and by a crossing limit order, so the two can never
     /// drift apart.
+    /// Adjust a player's cached count of resting orders on one side.
+    fn bump_working(&mut self, player: &PlayerId, side: Side, delta: i64) {
+        let pos = self.positions.entry(player.clone()).or_default();
+        match side {
+            Side::Bid => pos.working_bids += delta,
+            Side::Offer => pos.working_offers += delta,
+        }
+    }
+
     fn execute(&mut self, taker: &PlayerId, direction: Direction) -> Option<Trade> {
         let (side, price) = match direction {
             Direction::Buy => (Side::Offer, self.book.best_offer()?.price),
@@ -364,6 +385,7 @@ impl Market {
             levels.remove(&price);
         }
         self.index.remove(&resting.id);
+        self.bump_working(&resting.player, side, -1);
 
         let (buyer, seller) = match direction {
             Direction::Buy => (taker.clone(), resting.player.clone()),
@@ -414,8 +436,41 @@ impl Market {
             levels.remove(&price);
         }
         self.index.remove(&order);
+        self.bump_working(&player, side, -1);
 
         Ok(vec![Event::OrderCancelled { order, player }])
+    }
+
+    /// A stable string describing the entire market state.
+    ///
+    /// Two markets with the same fingerprint hold the same book, in the same
+    /// queue order, with the same positions. Used to check that a session
+    /// replayed from its command log matches the one that was played.
+    ///
+    /// Deterministic because both `BTreeMap`s iterate in key order and each
+    /// price level is already in arrival order.
+    pub fn fingerprint(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let _ = write!(out, "phase={:?};", self.phase);
+        for (price, queue) in &self.book.bids {
+            for o in queue {
+                let _ = write!(out, "B{}@{}~{};", o.id.0, price.0, o.player.0);
+            }
+        }
+        for (price, queue) in &self.book.offers {
+            for o in queue {
+                let _ = write!(out, "O{}@{}~{};", o.id.0, price.0, o.player.0);
+            }
+        }
+        for (player, pos) in &self.positions {
+            let _ = write!(
+                out,
+                "P{}={}/{}/{}/{};",
+                player.0, pos.net, pos.cash, pos.working_bids, pos.working_offers
+            );
+        }
+        out
     }
 
     /// Final score for one player: the cash they took in, plus whatever their

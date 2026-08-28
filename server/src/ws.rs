@@ -54,6 +54,7 @@ async fn handle_socket(socket: WebSocket, q: WsQuery, app: AppState) {
         return;
     };
 
+    handle.touch();
     let (mut sink, mut stream) = socket.split();
     let mut broadcast_rx = handle.events.subscribe();
     let (priv_tx, mut priv_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -88,6 +89,7 @@ async fn handle_socket(socket: WebSocket, q: WsQuery, app: AppState) {
                 let Message::Text(text) = msg else { continue };
                 match serde_json::from_str::<ClientCommand>(&text) {
                     Ok(cmd) => {
+                        handle.touch();
                         let _ = handle.tx.send(Msg::Cmd(Envelope {
                             who: who.clone(),
                             cmd,

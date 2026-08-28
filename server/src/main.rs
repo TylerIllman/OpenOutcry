@@ -11,7 +11,9 @@
 mod db;
 mod http;
 mod protocol;
+mod replay;
 mod state;
+mod translate;
 mod ws;
 
 use axum::Router;
@@ -30,6 +32,8 @@ async fn main() {
         )
         .init();
 
+    let app_state = AppState::new();
+
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "web/dist".to_string());
     let index = format!("{static_dir}/index.html");
 
@@ -38,15 +42,34 @@ async fn main() {
         .route("/api/sessions/{code}", get(http::get_session))
         .route("/api/sessions/{code}/join", post(http::join_session))
         .route("/api/sessions/{code}/export.csv", get(http::export_csv))
+        .route("/api/sessions/{code}/verify", get(http::verify))
         .route("/ws", get(ws::ws_handler))
         // Anything else is the SPA. The fallback to index.html is what makes
         // /host/ABC123 work on a hard refresh.
         .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(&index)))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState::new());
+        .with_state(app_state.clone());
 
     let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080u16);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+
+    // Sessions live in memory, so abandoned ones would otherwise accumulate for
+    // as long as the process runs.
+    let sweeper = app_state.clone();
+    tokio::spawn(async move {
+        let ttl_ms: i64 = std::env::var("SESSION_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6 * 60 * 60 * 1000); // six hours
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            let dropped = sweeper.evict_idle(ttl_ms).await;
+            if dropped > 0 {
+                tracing::info!("evicted {dropped} idle session(s)");
+            }
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     tracing::info!("listening on http://{addr} (serving {static_dir})");

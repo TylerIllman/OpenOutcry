@@ -284,6 +284,5 @@ fn replaying_the_same_commands_gives_the_same_book() {
     script(&mut b);
 
     assert_eq!(a.seq, b.seq);
-    assert_eq!(a.book.best_bid(), b.book.best_bid());
-    assert_eq!(a.book.best_offer(), b.book.best_offer());
+    assert_eq!(a.fingerprint(), b.fingerprint(), "same commands must give the same market");
 }

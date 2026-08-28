@@ -147,3 +147,42 @@ pub fn insert_trade(
     )?;
     Ok(())
 }
+
+/// The tape, with names resolved. Survives the session being evicted from
+/// memory, which the actor's own copy does not.
+pub fn read_trades(conn: &Connection, code: &str) -> rusqlite::Result<Vec<TradeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.seq, t.ts, t.price,
+                COALESCE(b.name, t.buyer_id), COALESCE(s.name, t.seller_id),
+                t.aggressor, t.self_trade
+           FROM trade t
+           LEFT JOIN player b ON b.id = t.buyer_id
+           LEFT JOIN player s ON s.id = t.seller_id
+          WHERE t.code = ?1
+          ORDER BY t.seq",
+    )?;
+    let rows = stmt
+        .query_map([code], |r| {
+            Ok(TradeRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                price: r.get(2)?,
+                buyer: r.get(3)?,
+                seller: r.get(4)?,
+                aggressor: r.get(5)?,
+                self_trade: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub struct TradeRow {
+    pub seq: i64,
+    pub ts: i64,
+    pub price: f64,
+    pub buyer: String,
+    pub seller: String,
+    pub aggressor: String,
+    pub self_trade: bool,
+}
