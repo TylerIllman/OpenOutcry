@@ -174,6 +174,8 @@ impl AppState {
             tokens: HashMap::new(),
             market,
             bots: Vec::new(),
+            bot_rate: 6.0,
+            bot_buy_bias: 0.5,
             trades: Vec::new(),
             settlement: None,
             seq: 0,
@@ -238,17 +240,24 @@ fn generate_code() -> String {
     (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
 }
 
-/// A bot's private state. The engine knows nothing about bots — to it they are
-/// ordinary players — so all that is kept here is what it needs to decide what
-/// to do next.
+/// A bot.
+///
+/// Bots are **customers, not market makers**. They never post a quote — they
+/// only lift offers and hit bids that the humans have made.
+///
+/// They also have no view on price. They buy and sell at random, at a rate the
+/// host sets. That is deliberate: the point of them is to supply flow so a
+/// small room still has someone to trade against, and giving them opinions
+/// would quietly turn them into the thing the players are supposed to be
+/// competing at.
 #[derive(Debug, Clone)]
 struct Bot {
     id: String,
-    /// This bot's private guess at the answer. Each one is drawn separately, so
-    /// they disagree with each other, which is what makes them quote both sides
-    /// and trade among themselves rather than all leaning the same way.
-    opinion: f64,
 }
+
+/// How often the bot timer fires. Bot rates are set per minute and converted
+/// against this.
+const TICK_MS: f64 = 900.0;
 
 const BOT_NAMES: [&str; 12] = [
     "Ada", "Bo", "Cleo", "Dex", "Eve", "Finn", "Gus", "Hana", "Ivo", "Jax", "Kit", "Lux",
@@ -263,6 +272,10 @@ struct SessionActor {
     tokens: HashMap<String, String>,
     market: Market,
     bots: Vec<Bot>,
+    /// Orders per minute, per bot.
+    bot_rate: f64,
+    /// 0..1. The chance any given bot order is a buy rather than a sell.
+    bot_buy_bias: f64,
     trades: Vec<Trade>,
     settlement: Option<Settlement>,
     /// Broadcast sequence. Separate from `market.seq`.
@@ -411,7 +424,8 @@ impl SessionActor {
             ClientCommand::OpenTrading
             | ClientCommand::CloseTrading
             | ClientCommand::Settle { .. }
-            | ClientCommand::AddBot { .. }
+            | ClientCommand::AddBot
+            | ClientCommand::SetBotFlow { .. }
             | ClientCommand::RemoveBots
                 if !is_host =>
             {
@@ -434,8 +448,12 @@ impl SessionActor {
                 self.settle(*true_value);
                 self.persist_command(&env.cmd, None);
             }
-            ClientCommand::AddBot { anchor } => self.add_bot(*anchor),
-            ClientCommand::RemoveBots => self.remove_bots(),
+            ClientCommand::AddBot => self.add_bot(),
+            ClientCommand::SetBotFlow { orders_per_minute, buy_bias } => {
+                self.bot_rate = orders_per_minute.clamp(0.0, 60.0);
+                self.bot_buy_bias = buy_bias.clamp(0.0, 1.0);
+            }
+            ClientCommand::RemoveBots => self.bots.clear(),
 
             ClientCommand::PlaceOrder { .. }
             | ClientCommand::CancelOrder { .. }
@@ -560,7 +578,7 @@ impl SessionActor {
     }
 
     /// Returns whether the engine accepted the transition.
-    fn add_bot(&mut self, anchor: f64) {
+    fn add_bot(&mut self) {
         let n = self.bots.len();
         let base = BOT_NAMES[n % BOT_NAMES.len()];
         let name = if n < BOT_NAMES.len() {
@@ -568,120 +586,54 @@ impl SessionActor {
         } else {
             format!("{base}{}", n / BOT_NAMES.len() + 1)
         };
-
         let (id, _token) = self.add_player(name, true);
-
-        let spread = if anchor == 0.0 { 1.0 } else { anchor.abs() * 0.15 };
-        let opinion = anchor + rand::thread_rng().gen_range(-spread..spread);
-        self.bots.push(Bot { id, opinion });
+        self.bots.push(Bot { id });
     }
 
-    /// Stops the bots and pulls their resting orders. They stay in the game as
-    /// players, so whatever position they built still settles and still shows
-    /// on the leaderboard.
-    fn remove_bots(&mut self) {
-        let ids: Vec<String> = self.bots.drain(..).map(|b| b.id).collect();
-        for id in ids {
-            while let Some(order_id) = self.first_order_of(&id) {
-                let wire = ClientCommand::CancelOrder { order_id };
-                let Some(cmd) = to_engine_command(Some(&id), &wire) else { break };
-                if self.execute_command(cmd, Some(&id), &wire).is_err() {
-                    break;
-                }
-            }
-        }
-    }
-
-    fn first_order_of(&self, player_id: &str) -> Option<String> {
-        self.market
-            .book
-            .bids
-            .values()
-            .chain(self.market.book.offers.values())
-            .flatten()
-            .find(|o| o.player.0 == player_id)
-            .map(|o| o.id.0.to_string())
-    }
-
-    fn mid(&self) -> Option<f64> {
-        let bid = self.market.book.best_bid()?.price.to_f64();
-        let offer = self.market.book.best_offer()?.price.to_f64();
-        Some((bid + offer) / 2.0)
-    }
-
-    fn round_to_tick(&self, price: f64) -> f64 {
-        match self.meta.tick_size {
-            Some(tick) if tick > 0.0 => (price / tick).round() * tick,
-            _ => (price * 100.0).round() / 100.0,
-        }
-    }
-
-    /// One decision per bot, on a timer.
+    /// One roll per bot, on a timer.
     ///
-    /// Each bot mostly quotes around a blend of its own opinion and where the
-    /// market actually is, so it follows the room without simply agreeing with
-    /// it. It occasionally takes when the market is through its opinion, and
-    /// occasionally pulls an order so the book does not just accumulate.
+    /// No pricing, no opinion, no cleverness: each bot decides whether to act
+    /// at all, then picks a direction, then takes whatever price is there. If
+    /// the side it wants is empty it simply does nothing this tick.
     fn bot_tick(&mut self) {
         if self.bots.is_empty() || self.meta.phase != Phase::Open {
             return;
         }
 
-        let bots = self.bots.clone();
-        for bot in bots {
+        // Orders per minute, as a per-tick probability. Capped at 1 so a very
+        // high rate cannot make a bot act more than once per tick.
+        let per_tick = (self.bot_rate * TICK_MS / 60_000.0).clamp(0.0, 1.0);
+        if per_tick <= 0.0 {
+            return;
+        }
+        let buy_bias = self.bot_buy_bias;
+
+        for bot in self.bots.clone() {
             let mut rng = rand::thread_rng();
-            if rng.gen_range(0.0..1.0) > 0.6 {
+            if rng.gen_range(0.0..1.0) >= per_tick {
                 continue;
             }
 
-            let target = match self.mid() {
-                Some(mid) => (mid + bot.opinion) / 2.0,
-                None => bot.opinion,
-            };
-            let pos = self
-                .market
-                .positions
-                .get(&engine::PlayerId(bot.id.clone()))
-                .cloned()
-                .unwrap_or_default();
-            let working = pos.working_bids + pos.working_offers;
-
-            let roll: f64 = rng.gen_range(0.0..1.0);
-            let best_offer = self.market.book.best_offer().map(|o| o.price.to_f64());
-            let best_bid = self.market.book.best_bid().map(|o| o.price.to_f64());
-
-            let wire = if roll < 0.14 {
-                // The market is offering below what this bot thinks it is worth,
-                // or bidding above. Hit it.
-                match (best_offer, best_bid) {
-                    (Some(o), _) if o < bot.opinion => {
-                        Some(ClientCommand::Take { direction: Direction::Buy })
-                    }
-                    (_, Some(b)) if b > bot.opinion => {
-                        Some(ClientCommand::Take { direction: Direction::Sell })
-                    }
-                    _ => None,
-                }
-            } else if roll < 0.26 || working >= 4 {
-                self.first_order_of(&bot.id)
-                    .map(|order_id| ClientCommand::CancelOrder { order_id })
+            let direction = if rng.gen_range(0.0..1.0) < buy_bias {
+                Direction::Buy
             } else {
-                let side = if rng.gen_bool(0.5) { Side::Bid } else { Side::Offer };
-                let floor = self.meta.tick_size.unwrap_or(0.01).max(0.01);
-                let edge = (target.abs() * 0.02).max(floor) * rng.gen_range(1.0..3.5);
-                let price = match side {
-                    Side::Bid => target - edge,
-                    Side::Offer => target + edge,
-                };
-                let price = self.round_to_tick(price);
-                (price > 0.0).then_some(ClientCommand::PlaceOrder { side, price })
+                Direction::Sell
             };
 
-            let Some(wire) = wire else { continue };
+            // Nothing to hit on that side. The bot does not go looking for the
+            // other one — that would quietly reintroduce a preference.
+            let available = match direction {
+                Direction::Buy => self.market.book.best_offer().is_some(),
+                Direction::Sell => self.market.book.best_bid().is_some(),
+            };
+            if !available {
+                continue;
+            }
+
+            let wire = ClientCommand::Take { direction };
             if let Some(cmd) = to_engine_command(Some(&bot.id), &wire) {
-                // A rejection is fine and expected — the bot may be at its
-                // position limit, or the order it tried to pull may have just
-                // been filled.
+                // Rejections are expected: the bot may be at its position limit,
+                // or another bot may have just taken the price it wanted.
                 let _ = self.execute_command(cmd, Some(&bot.id), &wire);
             }
         }
@@ -711,9 +663,13 @@ impl SessionActor {
         let _ = self.market.apply(Command::Settle { true_value: tv });
         self.meta.phase = Phase::Settled;
 
+        // Bots are left off the leaderboard: it is a scoreboard for the room,
+        // and nobody wants to be beaten by Cleo. Note this means the visible
+        // P&L no longer sums to zero — the bots hold the other side of it.
         let results: Vec<protocol::Result> = self
             .players
             .iter()
+            .filter(|p| !p.is_bot)
             .map(|p| {
                 let id = engine::PlayerId(p.id.clone());
                 let pos = self.market.positions.get(&id).cloned().unwrap_or_default();

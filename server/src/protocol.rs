@@ -195,11 +195,18 @@ pub enum ClientCommand {
     CloseTrading,
     #[serde(rename_all = "camelCase")]
     Settle { true_value: f64 },
-    /// Host-only. Adds one bot that quotes around `anchor` — a rough guess at
-    /// what the answer might be, used to give it somewhere to start.
+    /// Host-only. Adds one bot.
+    ///
+    /// Bots have no view on price. They buy and sell at random, at a rate the
+    /// host sets — they are order flow, not opinion.
+    AddBot,
+    /// Host-only. How the bots behave.
+    ///
+    /// `orders_per_minute` is per bot. `buy_bias` is 0..1: 0.5 is even, higher
+    /// buys more than it sells, so the host can lean the flow one way.
     #[serde(rename_all = "camelCase")]
-    AddBot { anchor: f64 },
-    /// Host-only. Pulls every bot's orders and stops them trading.
+    SetBotFlow { orders_per_minute: f64, buy_bias: f64 },
+    /// Host-only. Stops the bots trading.
     RemoveBots,
 }
 

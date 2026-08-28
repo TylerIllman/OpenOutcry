@@ -39,7 +39,8 @@ pub fn to_engine_command(player_id: Option<&str>, cmd: &ClientCommand) -> Option
         // CancelOrder commands under their own player id, which is what keeps
         // the command log replayable despite the randomness.
         ClientCommand::Resync { .. }
-        | ClientCommand::AddBot { .. }
+        | ClientCommand::AddBot
+        | ClientCommand::SetBotFlow { .. }
         | ClientCommand::RemoveBots => return None,
     })
 }

@@ -189,6 +189,17 @@ fact — worse for both the engine and the player.
 `Trade.selfTrade` is on the wire and the tape renders a `self` chip. This is the
 mitigation raised against decision 19, now taken.
 
+### 29. Bots are dumb flow, not opponents
+Bots **only take** — they never quote — and they have **no view on price**. The
+host sets a rate and a buy/sell lean; everything else is random.
+*Rejected:* market-making bots that quote both sides around an anchor (built
+first, then removed — they did the players' job for them); bots with a private
+fair value and a logistic willingness curve (built second, then removed — it
+made the game about guessing the bots' anchor rather than estimating the answer).
+*Also:* bots are kept off the leaderboard, so the displayed P&L no longer sums
+to zero. The controls sit behind a gear icon because the host screen is
+projected, and the roster and trader count deliberately do not distinguish bots.
+
 ---
 
 ## Still open

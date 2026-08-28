@@ -5,4 +5,4 @@ import type { Side } from "./Side";
 /**
  * Client -> server.
  */
-export type ClientCommand = { "t": "placeOrder", side: Side, price: number, } | { "t": "cancelOrder", orderId: string, } | { "t": "take", direction: Direction, } | { "t": "resync", fromSeq: number, } | { "t": "openTrading" } | { "t": "closeTrading" } | { "t": "settle", trueValue: number, } | { "t": "addBot", anchor: number, } | { "t": "removeBots" };
+export type ClientCommand = { "t": "placeOrder", side: Side, price: number, } | { "t": "cancelOrder", orderId: string, } | { "t": "take", direction: Direction, } | { "t": "resync", fromSeq: number, } | { "t": "openTrading" } | { "t": "closeTrading" } | { "t": "settle", trueValue: number, } | { "t": "addBot" } | { "t": "setBotFlow", ordersPerMinute: number, buyBias: number, } | { "t": "removeBots" };

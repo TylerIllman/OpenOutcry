@@ -17,7 +17,9 @@ export function HostSession() {
   const { state, send } = useSession({ code, hostToken });
   const reject = useTransientReject(state.reject);
   const [trueValue, setTrueValue] = useState("");
-  const [anchor, setAnchor] = useState("");
+  const [showBots, setShowBots] = useState(false);
+  const [botRate, setBotRate] = useState(6);
+  const [buyBias, setBuyBias] = useState(50);
 
   const heard = useRef<number | null>(null);
   useEffect(() => {
@@ -61,6 +63,15 @@ export function HostSession() {
           <PhasePill phase={phase} />
           <ConnectionDot connection={state.connection} />
           <MuteButton />
+          <button
+            className="gear"
+            onClick={() => setShowBots((v) => !v)}
+            aria-label="Bot controls"
+            aria-expanded={showBots}
+            title="Bot controls"
+          >
+            ⚙
+          </button>
           <span className="host__code">{code}</span>
         </div>
       </header>
@@ -74,10 +85,7 @@ export function HostSession() {
             </h2>
             <ul className="roster">
               {players.map((p) => (
-                <li key={p.id} className={p.isBot ? "is-bot" : undefined}>
-                  {p.name}
-                  {p.isBot && " ·bot"}
-                </li>
+                <li key={p.id}>{p.name}</li>
               ))}
             </ul>
             {players.length === 0 && <p className="tape__empty">Nobody yet.</p>}
@@ -91,14 +99,6 @@ export function HostSession() {
             <p className="field__hint">
               Late joiners are allowed, so you do not have to wait for stragglers.
             </p>
-            <BotControls
-              anchor={anchor}
-              setAnchor={setAnchor}
-              bots={players.filter((p) => p.isBot).length}
-              unit={session?.unit ?? ""}
-              onAdd={() => send({ t: "addBot", anchor: Number(anchor) || 0 })}
-              onRemove={() => send({ t: "removeBots" })}
-            />
           </div>
         </section>
       )}
@@ -122,14 +122,6 @@ export function HostSession() {
 
       {phase === "open" && (
         <footer className="host__controls">
-          <BotControls
-            anchor={anchor}
-            setAnchor={setAnchor}
-            bots={players.filter((p) => p.isBot).length}
-            unit={session?.unit ?? ""}
-            onAdd={() => send({ t: "addBot", anchor: Number(anchor) || 0 })}
-            onRemove={() => send({ t: "removeBots" })}
-          />
           <button className="btn btn--danger btn--lg" onClick={() => send({ t: "closeTrading" })}>
             Close trading
           </button>
@@ -214,50 +206,109 @@ export function HostSession() {
         </section>
       )}
 
+      {showBots && (
+        <BotControls
+          rate={botRate}
+          setRate={(v) => {
+            setBotRate(v);
+            send({ t: "setBotFlow", ordersPerMinute: v, buyBias: buyBias / 100 });
+          }}
+          bias={buyBias}
+          setBias={(v) => {
+            setBuyBias(v);
+            send({ t: "setBotFlow", ordersPerMinute: botRate, buyBias: v / 100 });
+          }}
+          bots={players.filter((p) => p.isBot).length}
+          onAdd={() => send({ t: "addBot" })}
+          onRemove={() => send({ t: "removeBots" })}
+          onClose={() => setShowBots(false)}
+        />
+      )}
+
       <Toast message={reject?.message ?? state.error} />
     </main>
   );
 }
 
 interface BotControlsProps {
-  anchor: string;
-  setAnchor: (v: string) => void;
+  rate: number;
+  setRate: (v: number) => void;
+  bias: number;
+  setBias: (v: number) => void;
   bots: number;
-  unit: string;
   onAdd: () => void;
   onRemove: () => void;
+  onClose: () => void;
 }
 
 /**
- * Bots need somewhere to start. They quote around this number, each with its
- * own randomly offset private opinion of it, so they disagree with each other
- * and end up making a two-sided market rather than all leaning the same way.
+ * Hidden behind the gear, and floating rather than inline, so the projected
+ * board never shows that the flow is synthetic. The room should not be able to
+ * see how many bots are in, or that a dial exists at all.
  */
-function BotControls({ anchor, setAnchor, bots, unit, onAdd, onRemove }: BotControlsProps) {
+function BotControls({
+  rate,
+  setRate,
+  bias,
+  setBias,
+  bots,
+  onAdd,
+  onRemove,
+  onClose,
+}: BotControlsProps) {
   return (
-    <div className="bots">
+    <aside className="bots" role="dialog" aria-label="Bot controls">
+      <header className="bots__head">
+        <h2 className="panel__title">
+          Bots <span className="count">{bots}</span>
+        </h2>
+        <button className="gear" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
+      </header>
+
+      <p className="bots__lead">
+        Bots only <b>take prices you make</b>. They never quote and have no view
+        on value — they buy and sell at random, at the rate you set.
+      </p>
+
       <label className="bots__field">
-        <span className="field__label">Bots quote around</span>
-        <input
-          className="input"
-          value={anchor}
-          onChange={(e) => setAnchor(e.target.value)}
-          placeholder={`rough guess${unit ? ` in ${unit}` : ""}`}
-          inputMode="decimal"
-        />
+        <span className="field__label">
+          Rate <b className="bots__value">{rate}</b> / min each
+        </span>
+        <input className="slider" type="range" min={0} max={30} step={1}
+               value={rate} onChange={(e) => setRate(Number(e.target.value))} />
+        <span className="field__hint">
+          {rate === 0 ? "Idle" : `About ${(rate * bots).toFixed(0)} orders a minute in total`}
+        </span>
       </label>
-      <button className="btn" onClick={onAdd} disabled={anchor.trim() === ""}>
-        Add bot
-      </button>
-      {bots > 0 && (
-        <>
-          <span className="bots__count">{bots} trading</span>
+
+      <label className="bots__field">
+        <span className="field__label">
+          Direction <b className="bots__value">{bias}% buy</b>
+        </span>
+        <input className="slider" type="range" min={0} max={100} step={5}
+               value={bias} onChange={(e) => setBias(Number(e.target.value))} />
+        <span className="field__hint">
+          {bias === 50
+            ? "Even both ways"
+            : bias > 50
+              ? "Leans towards buying — lifts your offers"
+              : "Leans towards selling — hits your bids"}
+        </span>
+      </label>
+
+      <div className="bots__actions">
+        <button className="btn" onClick={onAdd}>
+          Add bot
+        </button>
+        {bots > 0 && (
           <button className="btn btn--danger" onClick={onRemove}>
-            Remove bots
+            Remove all
           </button>
-        </>
-      )}
-    </div>
+        )}
+      </div>
+    </aside>
   );
 }
 

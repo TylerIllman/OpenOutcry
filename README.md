@@ -66,9 +66,8 @@ resolves but nothing loads, that is why.
 - **Self-trades are allowed** — and tagged, so they don't look like a bug.
 - The **host doesn't trade**. They type the settlement value at the end, so
   giving them a position would be an open goal.
-- The host can **add bots**, which quote around a rough anchor and trade with
-  each other. Useful for a small room, or to stop the book being empty at the
-  start of a round.
+- The host can add **bots**, which take prices at random. They are order flow,
+  not opponents.
 
 `P&L = Σ(sells) − Σ(buys) + position × true value`
 
@@ -77,17 +76,29 @@ that answer, and the leaderboard.
 
 ## Bots
 
-Each bot is an ordinary player as far as the engine is concerned: it holds a
-position, respects the limit, and settles on the leaderboard like anyone else.
-The host gives them a rough anchor to quote around, and each bot draws its own
-private opinion offset from it — so they disagree with each other, which is what
-makes them post a two-sided market instead of all leaning the same way.
+The host can add bots so a small room still has someone to trade against. They
+are deliberately stupid:
 
-Bots decide on a timer, but **the randomness never reaches the command log**.
-A bot acts by issuing an ordinary `placeOrder` / `take` / `cancelOrder` under its
-own player id, through the same path a human's command takes. What gets logged is
-the decision, not the seed — so a session full of bots still replays exactly.
-Verified: `/verify` reports a match on a round with five bots in it.
+- **They never quote.** They only lift offers and hit bids that humans have
+  made. The players make the market; the bots are the customers.
+- **They have no view on price.** No fair value, no opinion, no cleverness —
+  they buy and sell at random. Giving them a view would quietly make them good
+  at the thing the players are supposed to be competing at, and the winner would
+  be whoever guessed closest to the bots' anchor.
+
+The host sets two things, behind a gear icon so the projected board never
+advertises that the flow is synthetic: how many orders per minute each bot
+sends, and how far the flow leans towards buying or selling. Measured at 15/min
+across 4 bots: 45-65 orders a minute, with direction exactly as set.
+
+Bots are ordinary players to the engine — they hold positions and respect the
+limit — but they are **left off the leaderboard**, which means the visible P&L
+no longer sums to zero. The bots are holding the other side of it.
+
+**Their randomness never reaches the command log.** A bot acts by issuing an
+ordinary `take` under its own player id, through the same path a human's command
+takes, so what gets logged is the decision rather than the seed. A session full
+of bots still replays exactly — verified through `/verify`.
 
 ## How it's built
 
