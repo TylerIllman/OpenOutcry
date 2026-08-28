@@ -180,14 +180,22 @@ brew install flyctl
 fly auth login
 ```
 
-App names are globally unique, so change `app = "open-outcry"` in `fly.toml` to
-something free before the first deploy. Then:
+App names are globally unique. Change `app` in `fly.toml` to a free name **and
+create the app under that same name** — `flyctl` reads the app from `fly.toml`,
+so if the two disagree every subsequent command targets an app you do not own
+and fails with `unauthorized` rather than anything more helpful.
 
 ```bash
 fly apps create your-app-name
-fly volumes create open_outcry_data --size 1 --region lhr
+fly volumes create open_outcry_data --size 1 --region syd
 fly deploy
 ```
+
+Set `primary_region` to whichever Fly region is closest to the room you are
+playing in, and create the volume in that same region — a volume elsewhere
+cannot be mounted. This is not a "nice to have": the whole game is people racing
+each other to hit the same bid, so a region on the wrong continent adds a couple
+of hundred milliseconds to every order and makes MINE feel broken.
 
 Add `--remote-only` to `fly deploy` to build on Fly's builders instead of your
 own Docker.

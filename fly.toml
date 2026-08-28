@@ -6,8 +6,12 @@
 #     set of sessions, and half the room would join a market the other half
 #     cannot see.
 
-app = "open-outcry"
-primary_region = "lhr"
+app = "ti-open-outcry"
+# Sydney is the closest Fly region to Perth (~50ms). Singapore ("sin") is a
+# similar distance and sometimes routes better from WA — worth comparing if the
+# game ever feels laggy. London would be ~250ms on every order, which is enough
+# to make two people racing for the same offer feel broken.
+primary_region = "syd"
 
 [build]
 
