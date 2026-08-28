@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / front end
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Local data — session databases are runtime state, not source
+*.db
+*.db-shm
+*.db-wal
+/data/
+
+# Env
+.env
+.env.local
+
+# macOS
+.DS_Store
