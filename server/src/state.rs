@@ -58,6 +58,8 @@ pub enum Msg {
     /// A stable description of live market state, for checking it against a
     /// replay of the command log.
     Fingerprint(oneshot::Sender<String>),
+    /// Wake the bots. Sent on a timer; does nothing if there are none.
+    BotTick,
 }
 
 pub struct SessionHandle {
@@ -171,6 +173,7 @@ impl AppState {
             names: HashMap::new(),
             tokens: HashMap::new(),
             market,
+            bots: Vec::new(),
             trades: Vec::new(),
             settlement: None,
             seq: 0,
@@ -180,6 +183,21 @@ impl AppState {
         };
 
         tokio::spawn(actor.run(rx));
+
+        // Wake the bots on a timer. This holds a *weak* sender, so it does not
+        // keep the actor alive: once the registry drops the session, the upgrade
+        // fails and this task exits with it.
+        let weak = tx.downgrade();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_millis(900));
+            loop {
+                ticks.tick().await;
+                let Some(tx) = weak.upgrade() else { break };
+                if tx.send(Msg::BotTick).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         let handle = Arc::new(SessionHandle {
             code: code.clone(),
@@ -220,6 +238,22 @@ fn generate_code() -> String {
     (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
 }
 
+/// A bot's private state. The engine knows nothing about bots — to it they are
+/// ordinary players — so all that is kept here is what it needs to decide what
+/// to do next.
+#[derive(Debug, Clone)]
+struct Bot {
+    id: String,
+    /// This bot's private guess at the answer. Each one is drawn separately, so
+    /// they disagree with each other, which is what makes them quote both sides
+    /// and trade among themselves rather than all leaning the same way.
+    opinion: f64,
+}
+
+const BOT_NAMES: [&str; 12] = [
+    "Ada", "Bo", "Cleo", "Dex", "Eve", "Finn", "Gus", "Hana", "Ivo", "Jax", "Kit", "Lux",
+];
+
 struct SessionActor {
     meta: SessionMeta,
     players: Vec<Player>,
@@ -228,6 +262,7 @@ struct SessionActor {
     /// player_token -> player_id
     tokens: HashMap<String, String>,
     market: Market,
+    bots: Vec<Bot>,
     trades: Vec<Trade>,
     settlement: Option<Settlement>,
     /// Broadcast sequence. Separate from `market.seq`.
@@ -255,7 +290,7 @@ impl SessionActor {
                     let _ = reply.send(found);
                 }
                 Msg::Join { name, reply } => {
-                    let (id, token) = self.add_player(name);
+                    let (id, token) = self.add_player(name, false);
                     let _ = reply.send((id, token));
                 }
                 Msg::Export(reply) => {
@@ -264,16 +299,18 @@ impl SessionActor {
                 Msg::Fingerprint(reply) => {
                     let _ = reply.send(self.market.fingerprint());
                 }
+                Msg::BotTick => self.bot_tick(),
                 Msg::Cmd(env) => self.handle(env),
             }
         }
     }
 
-    fn add_player(&mut self, name: String) -> (String, String) {
+    fn add_player(&mut self, name: String, is_bot: bool) -> (String, String) {
         let player = Player {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.clone(),
             joined_at: now_ms(),
+            is_bot,
         };
         let token = uuid::Uuid::new_v4().to_string();
 
@@ -371,7 +408,11 @@ impl SessionActor {
                 let _ = env.reply.send(self.snapshot(&env.who));
             }
 
-            ClientCommand::OpenTrading | ClientCommand::CloseTrading | ClientCommand::Settle { .. }
+            ClientCommand::OpenTrading
+            | ClientCommand::CloseTrading
+            | ClientCommand::Settle { .. }
+            | ClientCommand::AddBot { .. }
+            | ClientCommand::RemoveBots
                 if !is_host =>
             {
                 let _ = env.reply.send(ServerEvent::Rejected {
@@ -393,6 +434,8 @@ impl SessionActor {
                 self.settle(*true_value);
                 self.persist_command(&env.cmd, None);
             }
+            ClientCommand::AddBot { anchor } => self.add_bot(*anchor),
+            ClientCommand::RemoveBots => self.remove_bots(),
 
             ClientCommand::PlaceOrder { .. }
             | ClientCommand::CancelOrder { .. }
@@ -424,18 +467,29 @@ impl SessionActor {
     /// told and in what order. Rejections go back to the one player who caused
     /// them, never to the room.
     fn run_engine(&mut self, cmd: Command, actor: Option<String>, env: &Envelope) {
-        match self.market.apply(cmd.clone()) {
-            Err(reject) => {
-                let (reason, message) = describe(reject);
-                let _ = env.reply.send(ServerEvent::Rejected { reason, message: message.into() });
-            }
-            Ok(events) => {
-                self.persist_command(&env.cmd, actor.as_deref());
-                for ev in events {
-                    self.publish(ev);
-                }
-            }
+        if let Err(reject) = self.execute_command(cmd, actor.as_deref(), &env.cmd) {
+            let (reason, message) = describe(reject);
+            let _ = env.reply.send(ServerEvent::Rejected { reason, message: message.into() });
         }
+    }
+
+    /// Apply a command, and if the engine accepts it, log it and tell the room.
+    ///
+    /// Bots go through here too, under their own player id, so their orders are
+    /// in the command log as concrete decisions rather than as a seed nobody
+    /// could reproduce. That is what keeps a session with bots in it replayable.
+    fn execute_command(
+        &mut self,
+        cmd: Command,
+        actor: Option<&str>,
+        wire: &ClientCommand,
+    ) -> std::result::Result<(), Reject> {
+        let events = self.market.apply(cmd)?;
+        self.persist_command(wire, actor);
+        for ev in events {
+            self.publish(ev);
+        }
+        Ok(())
     }
 
     /// Turn one engine event into one broadcast event, stamped with the next
@@ -506,6 +560,133 @@ impl SessionActor {
     }
 
     /// Returns whether the engine accepted the transition.
+    fn add_bot(&mut self, anchor: f64) {
+        let n = self.bots.len();
+        let base = BOT_NAMES[n % BOT_NAMES.len()];
+        let name = if n < BOT_NAMES.len() {
+            base.to_string()
+        } else {
+            format!("{base}{}", n / BOT_NAMES.len() + 1)
+        };
+
+        let (id, _token) = self.add_player(name, true);
+
+        let spread = if anchor == 0.0 { 1.0 } else { anchor.abs() * 0.15 };
+        let opinion = anchor + rand::thread_rng().gen_range(-spread..spread);
+        self.bots.push(Bot { id, opinion });
+    }
+
+    /// Stops the bots and pulls their resting orders. They stay in the game as
+    /// players, so whatever position they built still settles and still shows
+    /// on the leaderboard.
+    fn remove_bots(&mut self) {
+        let ids: Vec<String> = self.bots.drain(..).map(|b| b.id).collect();
+        for id in ids {
+            while let Some(order_id) = self.first_order_of(&id) {
+                let wire = ClientCommand::CancelOrder { order_id };
+                let Some(cmd) = to_engine_command(Some(&id), &wire) else { break };
+                if self.execute_command(cmd, Some(&id), &wire).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn first_order_of(&self, player_id: &str) -> Option<String> {
+        self.market
+            .book
+            .bids
+            .values()
+            .chain(self.market.book.offers.values())
+            .flatten()
+            .find(|o| o.player.0 == player_id)
+            .map(|o| o.id.0.to_string())
+    }
+
+    fn mid(&self) -> Option<f64> {
+        let bid = self.market.book.best_bid()?.price.to_f64();
+        let offer = self.market.book.best_offer()?.price.to_f64();
+        Some((bid + offer) / 2.0)
+    }
+
+    fn round_to_tick(&self, price: f64) -> f64 {
+        match self.meta.tick_size {
+            Some(tick) if tick > 0.0 => (price / tick).round() * tick,
+            _ => (price * 100.0).round() / 100.0,
+        }
+    }
+
+    /// One decision per bot, on a timer.
+    ///
+    /// Each bot mostly quotes around a blend of its own opinion and where the
+    /// market actually is, so it follows the room without simply agreeing with
+    /// it. It occasionally takes when the market is through its opinion, and
+    /// occasionally pulls an order so the book does not just accumulate.
+    fn bot_tick(&mut self) {
+        if self.bots.is_empty() || self.meta.phase != Phase::Open {
+            return;
+        }
+
+        let bots = self.bots.clone();
+        for bot in bots {
+            let mut rng = rand::thread_rng();
+            if rng.gen_range(0.0..1.0) > 0.6 {
+                continue;
+            }
+
+            let target = match self.mid() {
+                Some(mid) => (mid + bot.opinion) / 2.0,
+                None => bot.opinion,
+            };
+            let pos = self
+                .market
+                .positions
+                .get(&engine::PlayerId(bot.id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let working = pos.working_bids + pos.working_offers;
+
+            let roll: f64 = rng.gen_range(0.0..1.0);
+            let best_offer = self.market.book.best_offer().map(|o| o.price.to_f64());
+            let best_bid = self.market.book.best_bid().map(|o| o.price.to_f64());
+
+            let wire = if roll < 0.14 {
+                // The market is offering below what this bot thinks it is worth,
+                // or bidding above. Hit it.
+                match (best_offer, best_bid) {
+                    (Some(o), _) if o < bot.opinion => {
+                        Some(ClientCommand::Take { direction: Direction::Buy })
+                    }
+                    (_, Some(b)) if b > bot.opinion => {
+                        Some(ClientCommand::Take { direction: Direction::Sell })
+                    }
+                    _ => None,
+                }
+            } else if roll < 0.26 || working >= 4 {
+                self.first_order_of(&bot.id)
+                    .map(|order_id| ClientCommand::CancelOrder { order_id })
+            } else {
+                let side = if rng.gen_bool(0.5) { Side::Bid } else { Side::Offer };
+                let floor = self.meta.tick_size.unwrap_or(0.01).max(0.01);
+                let edge = (target.abs() * 0.02).max(floor) * rng.gen_range(1.0..3.5);
+                let price = match side {
+                    Side::Bid => target - edge,
+                    Side::Offer => target + edge,
+                };
+                let price = self.round_to_tick(price);
+                (price > 0.0).then_some(ClientCommand::PlaceOrder { side, price })
+            };
+
+            let Some(wire) = wire else { continue };
+            if let Some(cmd) = to_engine_command(Some(&bot.id), &wire) {
+                // A rejection is fine and expected — the bot may be at its
+                // position limit, or the order it tried to pull may have just
+                // been filled.
+                let _ = self.execute_command(cmd, Some(&bot.id), &wire);
+            }
+        }
+    }
+
     fn set_phase(&mut self, phase: Phase) -> bool {
         let engine_phase = match phase {
             Phase::Lobby => engine::Phase::Lobby,

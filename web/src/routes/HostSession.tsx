@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { OrderBook } from "../components/OrderBook";
 import { TradeTape } from "../components/TradeTape";
 import { JoinPanel } from "../components/JoinPanel";
-import { ConnectionDot, PhasePill, Toast } from "../components/Bits";
+import { PriceChart } from "../components/PriceChart";
+import { ConnectionDot, MuteButton, PhasePill, Toast } from "../components/Bits";
 import { useSession, useTransientReject } from "../useSession";
 import { loadHostToken } from "../storage";
 import { exportUrl } from "../api";
 import { formatPrice } from "../protocol";
+import { sfx } from "../sfx";
 
 export function HostSession() {
   const { code = "" } = useParams();
@@ -15,6 +17,20 @@ export function HostSession() {
   const { state, send } = useSession({ code, hostToken });
   const reject = useTransientReject(state.reject);
   const [trueValue, setTrueValue] = useState("");
+  const [anchor, setAnchor] = useState("");
+
+  const heard = useRef<number | null>(null);
+  useEffect(() => {
+    if (heard.current !== null && state.trades.length > heard.current) sfx("tick");
+    heard.current = state.trades.length;
+  }, [state.trades.length]);
+
+  const lastPhase = state.session?.phase;
+  useEffect(() => {
+    if (lastPhase === "open") sfx("open");
+    if (lastPhase === "closed") sfx("close");
+    if (lastPhase === "settled") sfx("settle");
+  }, [lastPhase]);
 
   if (!hostToken) {
     return (
@@ -32,6 +48,7 @@ export function HostSession() {
   const phase = session?.phase ?? "lobby";
   const tick = session?.tickSize ?? null;
   const last = trades[trades.length - 1];
+  const worst = Math.max(1, ...(settlement?.results ?? []).map((r) => Math.abs(r.pnl)));
 
   return (
     <main className="host">
@@ -43,6 +60,7 @@ export function HostSession() {
         <div className="host__meta">
           <PhasePill phase={phase} />
           <ConnectionDot connection={state.connection} />
+          <MuteButton />
           <span className="host__code">{code}</span>
         </div>
       </header>
@@ -56,7 +74,10 @@ export function HostSession() {
             </h2>
             <ul className="roster">
               {players.map((p) => (
-                <li key={p.id}>{p.name}</li>
+                <li key={p.id} className={p.isBot ? "is-bot" : undefined}>
+                  {p.name}
+                  {p.isBot && " ·bot"}
+                </li>
               ))}
             </ul>
             {players.length === 0 && <p className="tape__empty">Nobody yet.</p>}
@@ -70,6 +91,14 @@ export function HostSession() {
             <p className="field__hint">
               Late joiners are allowed, so you do not have to wait for stragglers.
             </p>
+            <BotControls
+              anchor={anchor}
+              setAnchor={setAnchor}
+              bots={players.filter((p) => p.isBot).length}
+              unit={session?.unit ?? ""}
+              onAdd={() => send({ t: "addBot", anchor: Number(anchor) || 0 })}
+              onRemove={() => send({ t: "removeBots" })}
+            />
           </div>
         </section>
       )}
@@ -93,6 +122,14 @@ export function HostSession() {
 
       {phase === "open" && (
         <footer className="host__controls">
+          <BotControls
+            anchor={anchor}
+            setAnchor={setAnchor}
+            bots={players.filter((p) => p.isBot).length}
+            unit={session?.unit ?? ""}
+            onAdd={() => send({ t: "addBot", anchor: Number(anchor) || 0 })}
+            onRemove={() => send({ t: "removeBots" })}
+          />
           <button className="btn btn--danger btn--lg" onClick={() => send({ t: "closeTrading" })}>
             Close trading
           </button>
@@ -137,6 +174,8 @@ export function HostSession() {
             <span className="results__unit"> {session?.unit}</span>
           </p>
 
+          <PriceChart trades={trades} trueValue={settlement.trueValue} tickSize={tick} />
+
           <ol className="leaderboard">
             {[...settlement.results]
               .sort((a, b) => b.pnl - a.pnl)
@@ -150,6 +189,16 @@ export function HostSession() {
                       : r.position > 0
                         ? `long ${r.position}`
                         : `short ${-r.position}`}
+                  </span>
+                  <span className="leaderboard__bar" aria-hidden="true">
+                    <i
+                      className={r.pnl >= 0 ? "buy" : "sell"}
+                      style={{
+                        width: `${Math.min(100, (Math.abs(r.pnl) / worst) * 100)}%`,
+                        marginLeft: r.pnl >= 0 ? "50%" : undefined,
+                        marginRight: r.pnl < 0 ? "50%" : undefined,
+                      }}
+                    />
                   </span>
                   <span className={`leaderboard__pnl ${r.pnl >= 0 ? "buy" : "sell"}`}>
                     {r.pnl >= 0 ? "+" : ""}
@@ -167,6 +216,48 @@ export function HostSession() {
 
       <Toast message={reject?.message ?? state.error} />
     </main>
+  );
+}
+
+interface BotControlsProps {
+  anchor: string;
+  setAnchor: (v: string) => void;
+  bots: number;
+  unit: string;
+  onAdd: () => void;
+  onRemove: () => void;
+}
+
+/**
+ * Bots need somewhere to start. They quote around this number, each with its
+ * own randomly offset private opinion of it, so they disagree with each other
+ * and end up making a two-sided market rather than all leaning the same way.
+ */
+function BotControls({ anchor, setAnchor, bots, unit, onAdd, onRemove }: BotControlsProps) {
+  return (
+    <div className="bots">
+      <label className="bots__field">
+        <span className="field__label">Bots quote around</span>
+        <input
+          className="input"
+          value={anchor}
+          onChange={(e) => setAnchor(e.target.value)}
+          placeholder={`rough guess${unit ? ` in ${unit}` : ""}`}
+          inputMode="decimal"
+        />
+      </label>
+      <button className="btn" onClick={onAdd} disabled={anchor.trim() === ""}>
+        Add bot
+      </button>
+      {bots > 0 && (
+        <>
+          <span className="bots__count">{bots} trading</span>
+          <button className="btn btn--danger" onClick={onRemove}>
+            Remove bots
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 

@@ -66,8 +66,28 @@ resolves but nothing loads, that is why.
 - **Self-trades are allowed** — and tagged, so they don't look like a bug.
 - The **host doesn't trade**. They type the settlement value at the end, so
   giving them a position would be an open goal.
+- The host can **add bots**, which quote around a rough anchor and trade with
+  each other. Useful for a small room, or to stop the book being empty at the
+  start of a round.
 
 `P&L = Σ(sells) − Σ(buys) + position × true value`
+
+At the end everyone sees the answer, a chart of every trade in the round against
+that answer, and the leaderboard.
+
+## Bots
+
+Each bot is an ordinary player as far as the engine is concerned: it holds a
+position, respects the limit, and settles on the leaderboard like anyone else.
+The host gives them a rough anchor to quote around, and each bot draws its own
+private opinion offset from it — so they disagree with each other, which is what
+makes them post a two-sided market instead of all leaning the same way.
+
+Bots decide on a timer, but **the randomness never reaches the command log**.
+A bot acts by issuing an ordinary `placeOrder` / `take` / `cancelOrder` under its
+own player id, through the same path a human's command takes. What gets logged is
+the decision, not the seed — so a session full of bots still replays exactly.
+Verified: `/verify` reports a match on a round with five bots in it.
 
 ## How it's built
 

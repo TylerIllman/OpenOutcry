@@ -35,6 +35,11 @@ pub fn to_engine_command(player_id: Option<&str>, cmd: &ClientCommand) -> Option
         ClientCommand::Settle { true_value } => {
             Command::Settle { true_value: Price::from_f64(*true_value) }
         }
-        ClientCommand::Resync { .. } => return None,
+        // Not engine commands. Bots act by issuing ordinary PlaceOrder / Take /
+        // CancelOrder commands under their own player id, which is what keeps
+        // the command log replayable despite the randomness.
+        ClientCommand::Resync { .. }
+        | ClientCommand::AddBot { .. }
+        | ClientCommand::RemoveBots => return None,
     })
 }

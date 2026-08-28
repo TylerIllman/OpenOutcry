@@ -8,7 +8,7 @@ export function CreateSession() {
   const [question, setQuestion] = useState("");
   const [unit, setUnit] = useState("");
   const [tick, setTick] = useState("");
-  const [limit, setLimit] = useState("10");
+  const [limit, setLimit] = useState("5");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

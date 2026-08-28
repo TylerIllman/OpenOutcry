@@ -54,6 +54,10 @@ pub struct Player {
     pub name: String,
     #[ts(type = "number")]
     pub joined_at: i64,
+    /// Bots are ordinary players to the engine — they hold positions, respect
+    /// the limit and settle like anyone else. This only tells the UI to mark
+    /// them so the room knows who it is trading against.
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -191,6 +195,12 @@ pub enum ClientCommand {
     CloseTrading,
     #[serde(rename_all = "camelCase")]
     Settle { true_value: f64 },
+    /// Host-only. Adds one bot that quotes around `anchor` — a rough guess at
+    /// what the answer might be, used to give it somewhere to start.
+    #[serde(rename_all = "camelCase")]
+    AddBot { anchor: f64 },
+    /// Host-only. Pulls every bot's orders and stops them trading.
+    RemoveBots,
 }
 
 /* -- HTTP payloads -------------------------------------------------------- */

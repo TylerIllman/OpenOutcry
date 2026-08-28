@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { OrderBook } from "../components/OrderBook";
 import { TradeTape } from "../components/TradeTape";
-import { ConnectionDot, Toast } from "../components/Bits";
+import { PriceChart } from "../components/PriceChart";
+import { ConnectionDot, MuteButton, Toast } from "../components/Bits";
 import { useSession, useTransientReject } from "../useSession";
 import { loadPlayerIdentity } from "../storage";
 import { formatPrice } from "../protocol";
+import { sfx } from "../sfx";
 
 export function PlayerSession() {
   const { code = "" } = useParams();
@@ -22,17 +24,42 @@ export function PlayerSession() {
   const [bidPrice, setBidPrice] = useState("");
   const [offerPrice, setOfferPrice] = useState("");
 
-  if (!identity) return null;
-
   const { session, book, trades, you } = state;
   const phase = session?.phase ?? "lobby";
+  const myId = identity?.playerId;
+
+  // Your own fills, so you know you were hit without watching the screen.
+  const heard = useRef<number | null>(null);
+  useEffect(() => {
+    if (!myId) return;
+    const mine = trades.filter((t) => t.buyerId === myId || t.sellerId === myId);
+    if (heard.current !== null && mine.length > heard.current) {
+      const latest = mine[mine.length - 1];
+      if (latest) sfx(latest.buyerId === myId ? "buy" : "sell");
+    }
+    heard.current = mine.length;
+  }, [trades, myId]);
+
+  useEffect(() => {
+    if (state.reject) sfx("reject");
+  }, [state.reject]);
+
+  useEffect(() => {
+    if (phase === "open") sfx("open");
+    if (phase === "closed") sfx("close");
+    if (phase === "settled") sfx("settle");
+  }, [phase]);
+
+  if (!identity) return null;
+
   const tick = session?.tickSize ?? null;
-  const myOrders = [...book.bids, ...book.offers].filter(
-    (o) => o.playerId === identity.playerId,
-  );
+  const myOrders = [...book.bids, ...book.offers].filter((o) => o.playerId === identity.playerId);
   const bestBid = book.bids[0];
   const bestOffer = book.offers[0];
   const position = you?.position ?? 0;
+  const mine = state.settlement?.results.find((r) => r.playerId === identity.playerId);
+
+  const cancelAll = () => myOrders.forEach((o) => send({ t: "cancelOrder", orderId: o.id }));
 
   return (
     <main className="player">
@@ -41,7 +68,10 @@ export function PlayerSession() {
           <p className="player__question">{session?.question ?? "…"}</p>
           {session && <p className="player__unit">in {session.unit}</p>}
         </div>
-        <ConnectionDot connection={state.connection} />
+        <div className="player__head-right">
+          <ConnectionDot connection={state.connection} />
+          <MuteButton />
+        </div>
       </header>
 
       {phase === "lobby" && (
@@ -52,19 +82,34 @@ export function PlayerSession() {
       )}
 
       {phase === "settled" && state.settlement && (
-        <section className="player__waiting">
+        <section className="player__result">
           <p className="results__eyebrow">The answer was</p>
           <p className="results__value">{formatPrice(state.settlement.trueValue, tick)}</p>
-          {(() => {
-            const mine = state.settlement.results.find((r) => r.playerId === identity.playerId);
-            if (!mine) return null;
-            return (
+          {mine && (
+            <>
               <p className={`player__pnl ${mine.pnl >= 0 ? "buy" : "sell"}`}>
                 {mine.pnl >= 0 ? "+" : ""}
                 {formatPrice(mine.pnl, tick)}
               </p>
-            );
-          })()}
+              <p className="player__pnl-sub">
+                {mine.position === 0
+                  ? "finished flat"
+                  : mine.position > 0
+                    ? `finished long ${mine.position}`
+                    : `finished short ${-mine.position}`}
+                {" · "}cash {mine.cash >= 0 ? "+" : ""}
+                {formatPrice(mine.cash, tick)}
+              </p>
+            </>
+          )}
+          <PriceChart trades={trades} trueValue={state.settlement.trueValue} tickSize={tick} />
+          <TradeTape
+            trades={trades}
+            tickSize={tick}
+            variant="compact"
+            onlyPlayerId={identity.playerId}
+            limit={20}
+          />
         </section>
       )}
 
@@ -116,7 +161,7 @@ export function PlayerSession() {
 
             <div className="controls__quote">
               <form
-                className="quote quote--bid"
+                className="quote"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const p = Number(bidPrice);
@@ -140,7 +185,7 @@ export function PlayerSession() {
               </form>
 
               <form
-                className="quote quote--offer"
+                className="quote"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const p = Number(offerPrice);
@@ -168,6 +213,11 @@ export function PlayerSession() {
           <section className="my-orders">
             <h2 className="panel__title">
               Working <span className="count">{myOrders.length}</span>
+              {myOrders.length > 1 && (
+                <button className="btn btn--tiny my-orders__all" onClick={cancelAll}>
+                  Cancel all
+                </button>
+              )}
             </h2>
             {myOrders.length === 0 && <p className="tape__empty">No resting orders.</p>}
             <ul className="my-orders__list">
@@ -179,7 +229,7 @@ export function PlayerSession() {
                     className="btn btn--tiny"
                     onClick={() => send({ t: "cancelOrder", orderId: o.id })}
                   >
-                    Pull
+                    Cancel
                   </button>
                 </li>
               ))}
