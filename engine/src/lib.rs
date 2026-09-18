@@ -81,12 +81,28 @@ pub enum Phase {
 /// The only way to change the market. These get persisted and replayed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    AddPlayer { player: PlayerId },
-    PlaceOrder { player: PlayerId, side: Side, price: Price },
-    CancelOrder { player: PlayerId, order: OrderId },
-    Take { player: PlayerId, direction: Direction },
-    SetPhase { phase: Phase },
-    Settle { true_value: Price },
+    AddPlayer {
+        player: PlayerId,
+    },
+    PlaceOrder {
+        player: PlayerId,
+        side: Side,
+        price: Price,
+    },
+    CancelOrder {
+        player: PlayerId,
+        order: OrderId,
+    },
+    Take {
+        player: PlayerId,
+        direction: Direction,
+    },
+    SetPhase {
+        phase: Phase,
+    },
+    Settle {
+        true_value: Price,
+    },
 }
 
 /// What actually happened. The server turns these into messages for the browser.
@@ -177,7 +193,11 @@ impl Book {
             Side::Bid => &self.bids,
             Side::Offer => &self.offers,
         };
-        levels.values().flatten().filter(|o| &o.player == player).count() as i64
+        levels
+            .values()
+            .flatten()
+            .filter(|o| &o.player == player)
+            .count() as i64
     }
 }
 
@@ -233,18 +253,30 @@ impl Market {
                 self.phase = Phase::Settled;
                 Ok(vec![Event::Settled { true_value }])
             }
-            Command::PlaceOrder { player, side, price } => self.place_order(player, side, price),
+            Command::PlaceOrder {
+                player,
+                side,
+                price,
+            } => self.place_order(player, side, price),
             Command::CancelOrder { player, order } => self.cancel_order(player, order),
             Command::Take { player, direction } => self.take(player, direction),
         }
     }
 
     fn require_open(&self) -> Result<(), Reject> {
-        if self.phase == Phase::Open { Ok(()) } else { Err(Reject::NotOpen) }
+        if self.phase == Phase::Open {
+            Ok(())
+        } else {
+            Err(Reject::NotOpen)
+        }
     }
 
     fn require_player(&self, player: &PlayerId) -> Result<(), Reject> {
-        if self.positions.contains_key(player) { Ok(()) } else { Err(Reject::UnknownPlayer) }
+        if self.positions.contains_key(player) {
+            Ok(())
+        } else {
+            Err(Reject::UnknownPlayer)
+        }
     }
 
     /// The position limit counts orders that could still fill, not just the
@@ -281,10 +313,10 @@ impl Market {
         if price.0 <= 0 {
             return Err(Reject::BadPrice);
         }
-        if let Some(tick) = self.config.tick {
-            if tick.0 <= 0 || price.0 % tick.0 != 0 {
-                return Err(Reject::BadTick);
-            }
+        if let Some(tick) = self.config.tick
+            && (tick.0 <= 0 || price.0 % tick.0 != 0)
+        {
+            return Err(Reject::BadTick);
         }
 
         let (add_long, add_short) = match side {
@@ -308,7 +340,9 @@ impl Market {
                 Side::Bid => Direction::Buy,
                 Side::Offer => Direction::Sell,
             };
-            let trade = self.execute(&player, direction).ok_or(Reject::NoLiquidity)?;
+            let trade = self
+                .execute(&player, direction)
+                .ok_or(Reject::NoLiquidity)?;
             return Ok(vec![Event::Traded { trade }]);
         }
 
@@ -324,7 +358,9 @@ impl Market {
         self.bump_working(&order.player, side, 1);
 
         // Clone for the event, because pushing into the book moves the order.
-        let event = Event::OrderAdded { order: order.clone() };
+        let event = Event::OrderAdded {
+            order: order.clone(),
+        };
         self.level_mut(side, price).push_back(order);
         Ok(vec![event])
     }
@@ -349,7 +385,9 @@ impl Market {
             return Err(Reject::PositionLimit);
         }
 
-        let trade = self.execute(&player, direction).ok_or(Reject::NoLiquidity)?;
+        let trade = self
+            .execute(&player, direction)
+            .ok_or(Reject::NoLiquidity)?;
         Ok(vec![Event::Traded { trade }])
     }
 
@@ -423,7 +461,10 @@ impl Market {
             Side::Offer => &mut self.book.offers,
         };
         let queue = levels.get_mut(&price).ok_or(Reject::UnknownOrder)?;
-        let at = queue.iter().position(|o| o.id == order).ok_or(Reject::UnknownOrder)?;
+        let at = queue
+            .iter()
+            .position(|o| o.id == order)
+            .ok_or(Reject::UnknownOrder)?;
 
         if queue[at].player != player {
             return Err(Reject::NotYourOrder);

@@ -33,7 +33,9 @@ pub fn replay(conn: &Connection, code: &str) -> rusqlite::Result<Market> {
         .query_map([code], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
-        let _ = market.apply(Command::AddPlayer { player: PlayerId(id) });
+        let _ = market.apply(Command::AddPlayer {
+            player: PlayerId(id),
+        });
     }
 
     // Then every accepted command, in the order the actor applied them.
@@ -80,19 +82,65 @@ mod tests {
         // enough that any ordering mistake in replay would show up.
         let script: Vec<(Option<&str>, ClientCommand)> = vec![
             (None, ClientCommand::OpenTrading),
-            (Some("bob"), ClientCommand::PlaceOrder { side: WireSide::Offer, price: 47.0 }),
-            (Some("bob"), ClientCommand::PlaceOrder { side: WireSide::Offer, price: 47.0 }),
-            (Some("alice"), ClientCommand::PlaceOrder { side: WireSide::Bid, price: 45.0 }),
-            (Some("alice"), ClientCommand::CancelOrder { order_id: "3".into() }),
-            (Some("alice"), ClientCommand::PlaceOrder { side: WireSide::Bid, price: 50.0 }),
-            (Some("alice"), ClientCommand::Take { direction: Direction::Buy }),
-            (Some("bob"), ClientCommand::PlaceOrder { side: WireSide::Bid, price: 44.0 }),
+            (
+                Some("bob"),
+                ClientCommand::PlaceOrder {
+                    side: WireSide::Offer,
+                    price: 47.0,
+                },
+            ),
+            (
+                Some("bob"),
+                ClientCommand::PlaceOrder {
+                    side: WireSide::Offer,
+                    price: 47.0,
+                },
+            ),
+            (
+                Some("alice"),
+                ClientCommand::PlaceOrder {
+                    side: WireSide::Bid,
+                    price: 45.0,
+                },
+            ),
+            (
+                Some("alice"),
+                ClientCommand::CancelOrder {
+                    order_id: "3".into(),
+                },
+            ),
+            (
+                Some("alice"),
+                ClientCommand::PlaceOrder {
+                    side: WireSide::Bid,
+                    price: 50.0,
+                },
+            ),
+            (
+                Some("alice"),
+                ClientCommand::Take {
+                    direction: Direction::Buy,
+                },
+            ),
+            (
+                Some("bob"),
+                ClientCommand::PlaceOrder {
+                    side: WireSide::Bid,
+                    price: 44.0,
+                },
+            ),
         ];
 
         // Build the "live" market directly, and log the same commands.
-        let mut live = Market::new(engine::Config { tick: None, position_limit: 10 });
+        let mut live = Market::new(engine::Config {
+            tick: None,
+            position_limit: 10,
+        });
         for id in ["alice", "bob"] {
-            live.apply(Command::AddPlayer { player: PlayerId(id.into()) }).unwrap();
+            live.apply(Command::AddPlayer {
+                player: PlayerId(id.into()),
+            })
+            .unwrap();
         }
         for (seq, (who, cmd)) in script.iter().enumerate() {
             let engine_cmd = to_engine_command(*who, cmd).unwrap();

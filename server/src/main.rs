@@ -59,7 +59,10 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .with_state(app_state.clone());
 
-    let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080u16);
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080u16);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
 
     // Sessions live in memory, so abandoned ones would otherwise accumulate for

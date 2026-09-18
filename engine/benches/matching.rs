@@ -27,9 +27,15 @@ const TRADERS: usize = 20;
 const NO_LIMIT: i64 = i64::MAX / 4;
 
 fn open_market() -> Market {
-    let mut m = Market::new(Config { tick: None, position_limit: NO_LIMIT });
+    let mut m = Market::new(Config {
+        tick: None,
+        position_limit: NO_LIMIT,
+    });
     for i in 0..TRADERS {
-        m.apply(Command::AddPlayer { player: PlayerId(format!("p{i}")) }).unwrap();
+        m.apply(Command::AddPlayer {
+            player: PlayerId(format!("p{i}")),
+        })
+        .unwrap();
     }
     m.apply(Command::SetPhase { phase: Phase::Open }).unwrap();
     m

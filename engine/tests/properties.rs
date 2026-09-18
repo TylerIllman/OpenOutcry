@@ -14,10 +14,20 @@ const PLAYERS: [&str; 3] = ["alice", "bob", "priya"];
 
 #[derive(Debug, Clone)]
 enum Action {
-    Place { who: usize, side: bool, price: i64 },
-    Take { who: usize, buy: bool },
+    Place {
+        who: usize,
+        side: bool,
+        price: i64,
+    },
+    Take {
+        who: usize,
+        buy: bool,
+    },
     /// Cancel the nth live order belonging to this player, if they have one.
-    Cancel { who: usize, nth: usize },
+    Cancel {
+        who: usize,
+        nth: usize,
+    },
 }
 
 fn action() -> impl Strategy<Value = Action> {
@@ -112,8 +122,14 @@ fn check_invariants(market: &Market, limit: i64) {
         let pos = market.positions.get(&id).cloned().unwrap_or_default();
         let long = pos.net + market.book.working(&id, Side::Bid);
         let short = -pos.net + market.book.working(&id, Side::Offer);
-        assert!(long <= limit, "{name} could end up long {long} with a limit of {limit}");
-        assert!(short <= limit, "{name} could end up short {short} with a limit of {limit}");
+        assert!(
+            long <= limit,
+            "{name} could end up long {long} with a limit of {limit}"
+        );
+        assert!(
+            short <= limit,
+            "{name} could end up short {short} with a limit of {limit}"
+        );
     }
 }
 
@@ -127,11 +143,20 @@ fn prop_assert_crossed(bid: Price, offer: Price) {
 }
 
 fn run(actions: &[Action], limit: i64, tick: Option<Price>) {
-    let mut market = Market::new(Config { tick, position_limit: limit });
+    let mut market = Market::new(Config {
+        tick,
+        position_limit: limit,
+    });
     for name in PLAYERS {
-        market.apply(Command::AddPlayer { player: PlayerId(name.to_string()) }).unwrap();
+        market
+            .apply(Command::AddPlayer {
+                player: PlayerId(name.to_string()),
+            })
+            .unwrap();
     }
-    market.apply(Command::SetPhase { phase: Phase::Open }).unwrap();
+    market
+        .apply(Command::SetPhase { phase: Phase::Open })
+        .unwrap();
 
     for action in actions {
         let cmd = match action {
@@ -142,7 +167,11 @@ fn run(actions: &[Action], limit: i64, tick: Option<Price>) {
             },
             Action::Take { who, buy } => Command::Take {
                 player: PlayerId(PLAYERS[*who].to_string()),
-                direction: if *buy { Direction::Buy } else { Direction::Sell },
+                direction: if *buy {
+                    Direction::Buy
+                } else {
+                    Direction::Sell
+                },
             },
             Action::Cancel { who, nth } => {
                 let player = PlayerId(PLAYERS[*who].to_string());
@@ -150,7 +179,10 @@ fn run(actions: &[Action], limit: i64, tick: Option<Price>) {
                 if orders.is_empty() {
                     continue;
                 }
-                Command::CancelOrder { player, order: orders[nth % orders.len()] }
+                Command::CancelOrder {
+                    player,
+                    order: orders[nth % orders.len()],
+                }
             }
         };
 

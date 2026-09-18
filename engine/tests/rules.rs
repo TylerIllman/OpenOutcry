@@ -6,45 +6,77 @@
 use engine::*;
 
 fn market() -> Market {
-    let mut m = Market::new(Config { tick: None, position_limit: 10 });
-    m.apply(Command::AddPlayer { player: "alice".into() }).unwrap();
-    m.apply(Command::AddPlayer { player: "bob".into() }).unwrap();
+    let mut m = Market::new(Config {
+        tick: None,
+        position_limit: 10,
+    });
+    m.apply(Command::AddPlayer {
+        player: "alice".into(),
+    })
+    .unwrap();
+    m.apply(Command::AddPlayer {
+        player: "bob".into(),
+    })
+    .unwrap();
     m.apply(Command::SetPhase { phase: Phase::Open }).unwrap();
     m
 }
 
 fn bid(m: &mut Market, who: &str, px: f64) -> Result<Vec<Event>, Reject> {
-    m.apply(Command::PlaceOrder { player: who.into(), side: Side::Bid, price: Price::from_f64(px) })
+    m.apply(Command::PlaceOrder {
+        player: who.into(),
+        side: Side::Bid,
+        price: Price::from_f64(px),
+    })
 }
 
 fn offer(m: &mut Market, who: &str, px: f64) -> Result<Vec<Event>, Reject> {
-    m.apply(Command::PlaceOrder { player: who.into(), side: Side::Offer, price: Price::from_f64(px) })
+    m.apply(Command::PlaceOrder {
+        player: who.into(),
+        side: Side::Offer,
+        price: Price::from_f64(px),
+    })
 }
 
 fn take(m: &mut Market, who: &str, dir: Direction) -> Result<Vec<Event>, Reject> {
-    m.apply(Command::Take { player: who.into(), direction: dir })
+    m.apply(Command::Take {
+        player: who.into(),
+        direction: dir,
+    })
 }
 
 fn trades(events: &[Event]) -> Vec<&Trade> {
-    events.iter().filter_map(|e| match e {
-        Event::Traded { trade } => Some(trade),
-        _ => None,
-    }).collect()
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Traded { trade } => Some(trade),
+            _ => None,
+        })
+        .collect()
 }
 
 // -- Rule 1: phase ---------------------------------------------------------
 
 #[test]
 fn orders_rejected_before_trading_opens() {
-    let mut m = Market::new(Config { tick: None, position_limit: 10 });
-    m.apply(Command::AddPlayer { player: "alice".into() }).unwrap();
+    let mut m = Market::new(Config {
+        tick: None,
+        position_limit: 10,
+    });
+    m.apply(Command::AddPlayer {
+        player: "alice".into(),
+    })
+    .unwrap();
     assert_eq!(bid(&mut m, "alice", 45.0), Err(Reject::NotOpen));
 }
 
 #[test]
 fn orders_rejected_after_trading_closes() {
     let mut m = market();
-    m.apply(Command::SetPhase { phase: Phase::Closed }).unwrap();
+    m.apply(Command::SetPhase {
+        phase: Phase::Closed,
+    })
+    .unwrap();
     assert_eq!(bid(&mut m, "alice", 45.0), Err(Reject::NotOpen));
 }
 
@@ -52,8 +84,14 @@ fn orders_rejected_after_trading_closes() {
 
 #[test]
 fn price_off_tick_is_rejected() {
-    let mut m = Market::new(Config { tick: Some(Price::from_f64(0.5)), position_limit: 10 });
-    m.apply(Command::AddPlayer { player: "alice".into() }).unwrap();
+    let mut m = Market::new(Config {
+        tick: Some(Price::from_f64(0.5)),
+        position_limit: 10,
+    });
+    m.apply(Command::AddPlayer {
+        player: "alice".into(),
+    })
+    .unwrap();
     m.apply(Command::SetPhase { phase: Phase::Open }).unwrap();
     assert_eq!(bid(&mut m, "alice", 45.25), Err(Reject::BadTick));
     assert!(bid(&mut m, "alice", 45.5).is_ok());
@@ -108,7 +146,10 @@ fn a_crossing_order_never_rests_because_every_order_is_one_lot() {
 #[test]
 fn take_on_an_empty_book_is_rejected() {
     let mut m = market();
-    assert_eq!(take(&mut m, "alice", Direction::Buy), Err(Reject::NoLiquidity));
+    assert_eq!(
+        take(&mut m, "alice", Direction::Buy),
+        Err(Reject::NoLiquidity)
+    );
 }
 
 #[test]
@@ -119,7 +160,11 @@ fn mine_lifts_the_best_offer() {
 
     let events = take(&mut m, "alice", Direction::Buy).unwrap();
     let t = trades(&events);
-    assert_eq!(t[0].price, Price::from_f64(47.0), "must lift the best, not the first entered");
+    assert_eq!(
+        t[0].price,
+        Price::from_f64(47.0),
+        "must lift the best, not the first entered"
+    );
     assert_eq!(m.book.best_offer().unwrap().price, Price::from_f64(50.0));
 }
 
@@ -132,7 +177,11 @@ fn equal_prices_fill_in_sequence_order() {
     offer(&mut m, "bob", 47.0).unwrap();
 
     let events = take(&mut m, "alice", Direction::Buy).unwrap();
-    assert_eq!(trades(&events)[0].seller, "alice".into(), "alice was first in the queue");
+    assert_eq!(
+        trades(&events)[0].seller,
+        "alice".into(),
+        "alice was first in the queue"
+    );
 }
 
 #[test]
@@ -148,7 +197,11 @@ fn cancelling_mid_queue_preserves_everyone_elses_priority() {
     };
     offer(&mut m, "alice", 47.0).unwrap();
 
-    m.apply(Command::CancelOrder { player: "bob".into(), order: b }).unwrap();
+    m.apply(Command::CancelOrder {
+        player: "bob".into(),
+        order: b,
+    })
+    .unwrap();
 
     // Alice's first order still has priority over her second.
     let events = take(&mut m, "bob", Direction::Buy).unwrap();
@@ -175,7 +228,11 @@ fn a_self_trade_leaves_position_and_cash_unchanged() {
     offer(&mut m, "alice", 47.0).unwrap();
     take(&mut m, "alice", Direction::Buy).unwrap();
 
-    let p = m.positions.get(&"alice".into()).cloned().unwrap_or_default();
+    let p = m
+        .positions
+        .get(&"alice".into())
+        .cloned()
+        .unwrap_or_default();
     assert_eq!(p.net, 0);
     assert_eq!(p.cash, 0);
 }
@@ -184,7 +241,10 @@ fn a_self_trade_leaves_position_and_cash_unchanged() {
 
 #[test]
 fn position_limit_counts_working_orders_not_just_fills() {
-    let mut m = Market::new(Config { tick: None, position_limit: 2 });
+    let mut m = Market::new(Config {
+        tick: None,
+        position_limit: 2,
+    });
     for p in ["alice", "bob"] {
         m.apply(Command::AddPlayer { player: p.into() }).unwrap();
     }
@@ -201,8 +261,14 @@ fn position_limit_counts_working_orders_not_just_fills() {
 
 #[test]
 fn cancelling_frees_up_limit_headroom() {
-    let mut m = Market::new(Config { tick: None, position_limit: 1 });
-    m.apply(Command::AddPlayer { player: "alice".into() }).unwrap();
+    let mut m = Market::new(Config {
+        tick: None,
+        position_limit: 1,
+    });
+    m.apply(Command::AddPlayer {
+        player: "alice".into(),
+    })
+    .unwrap();
     m.apply(Command::SetPhase { phase: Phase::Open }).unwrap();
 
     let id = match &bid(&mut m, "alice", 40.0).unwrap()[0] {
@@ -211,7 +277,11 @@ fn cancelling_frees_up_limit_headroom() {
     };
     assert_eq!(bid(&mut m, "alice", 41.0), Err(Reject::PositionLimit));
 
-    m.apply(Command::CancelOrder { player: "alice".into(), order: id }).unwrap();
+    m.apply(Command::CancelOrder {
+        player: "alice".into(),
+        order: id,
+    })
+    .unwrap();
     assert!(bid(&mut m, "alice", 41.0).is_ok());
 }
 
@@ -225,7 +295,10 @@ fn you_cannot_cancel_someone_elses_order() {
         _ => panic!("expected OrderAdded"),
     };
     assert_eq!(
-        m.apply(Command::CancelOrder { player: "bob".into(), order: id }),
+        m.apply(Command::CancelOrder {
+            player: "bob".into(),
+            order: id
+        }),
         Err(Reject::NotYourOrder)
     );
 }
@@ -234,7 +307,10 @@ fn you_cannot_cancel_someone_elses_order() {
 fn cancelling_an_unknown_order_is_rejected() {
     let mut m = market();
     assert_eq!(
-        m.apply(Command::CancelOrder { player: "alice".into(), order: OrderId(999) }),
+        m.apply(Command::CancelOrder {
+            player: "alice".into(),
+            order: OrderId(999)
+        }),
         Err(Reject::UnknownOrder)
     );
 }
@@ -263,7 +339,10 @@ fn the_whole_market_is_zero_sum() {
     take(&mut m, "bob", Direction::Sell).unwrap();
 
     let tv = Price::from_f64(50.0);
-    let total: i64 = ["alice", "bob"].iter().map(|p| m.settle_pnl(&(*p).into(), tv)).sum();
+    let total: i64 = ["alice", "bob"]
+        .iter()
+        .map(|p| m.settle_pnl(&(*p).into(), tv))
+        .sum();
     assert_eq!(total, 0, "every lot has a buyer and a seller");
 }
 
@@ -284,5 +363,9 @@ fn replaying_the_same_commands_gives_the_same_book() {
     script(&mut b);
 
     assert_eq!(a.seq, b.seq);
-    assert_eq!(a.fingerprint(), b.fingerprint(), "same commands must give the same market");
+    assert_eq!(
+        a.fingerprint(),
+        b.fingerprint(),
+        "same commands must give the same market"
+    );
 }

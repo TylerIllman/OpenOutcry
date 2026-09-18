@@ -1,6 +1,7 @@
 # Backend guide
 
-What exists, what's stubbed, and exactly which front-end call hits which endpoint.
+The layout, every endpoint mapped to the front-end call that uses it, and the
+one thing deliberately left out.
 
 ## Layout
 
@@ -65,8 +66,12 @@ A bad or missing token is refused, not silently downgraded to a spectator.
 Every connection opens with a `snapshot`, so a first join and a reconnect take
 exactly the same code path.
 
-**Client -> server** (`ClientCommand`): `placeOrder`, `cancelOrder`, `take`,
-`resync`, and host-only `openTrading`, `closeTrading`, `settle`.
+**Client -> server** (`ClientCommand`): `placeOrder`, `cancelOrder`, `take` and
+`resync`, plus host-only `openTrading`, `closeTrading`, `settle`, `addBot`,
+`setBotFlow` and `removeBots`.
+
+Bots issue `take` under their own player id through the same path, which is why
+a session containing them still replays exactly.
 
 **Server -> client** (`ServerEvent`): `snapshot`, `playerJoined`, `phaseChanged`,
 `orderAdded`, `orderCancelled`, `trade`, `settled` — all carrying a monotonic

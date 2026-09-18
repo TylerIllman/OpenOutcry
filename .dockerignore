@@ -5,3 +5,7 @@ web/dist
 *.db
 *.db-shm
 *.db-wal
+
+# The build image pins its own Rust version; this file would make rustup fetch
+# a second toolchain, plus rustfmt and clippy, that the build never uses.
+rust-toolchain.toml

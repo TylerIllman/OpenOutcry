@@ -118,10 +118,10 @@ Everything fails with `not yet implemented`. That's `todo!()` in
 
 Now open two files side by side:
 
-* [engine/src/lib.rs](engine/src/lib.rs) — the types. Read it top to bottom.
+* [engine/src/lib.rs](../engine/src/lib.rs) — the types. Read it top to bottom.
   It's about 200 lines and mostly comments. You don't need to understand every
   line, but you should recognise `Command`, `Event`, `Order`, `Book`, `Market`.
-* [engine/tests/rules.rs](engine/tests/rules.rs) — twenty tests. This is the
+* [engine/tests/rules.rs](../engine/tests/rules.rs) — twenty tests. This is the
   spec. Every rule the game has is in here.
 
 Read `resting_orders_do_not_cross`. It's six lines. That's your first target.
@@ -334,7 +334,7 @@ and more annoying ways. That's why it's separate.
 
 ### Step 10: wire the actor
 
-In [server/src/state.rs](server/src/state.rs), the arm handling `PlaceOrder |
+In [server/src/state.rs](../server/src/state.rs), the arm handling `PlaceOrder |
 CancelOrder | Take` currently just returns "Matching engine not implemented
 yet". Replace it with:
 
@@ -376,7 +376,7 @@ a trading firm will care:
    bugs fifty hand-written tests won't, and it is the single most trading-firm-
    legible thing you can add.
 2. **Persistence and replay.** The schema is already in
-   [server/src/db.rs](server/src/db.rs). Append every accepted command, then
+   [server/src/db.rs](../server/src/db.rs). Append every accepted command, then
    write a test that replays a whole session from the log and asserts the final
    state is identical. Deterministic replay is the thing this design was built
    for — make it visible.

@@ -4,7 +4,8 @@ A hosted website where a group in one room plays an open-outcry estimation marke
 The host opens a session on a projector, players join on phones by QR, shout at each
 other, and trade a contract on a question with a hidden answer. No accounts, ever.
 
-Status: **scoped, not started.** Agreed 2026-08-28.
+Agreed 2026-08-28, before any code existed. Built since, and still
+accurate — the one addition is bots, described in the README.
 
 ---
 

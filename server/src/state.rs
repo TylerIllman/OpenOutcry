@@ -24,8 +24,8 @@ use rusqlite::Connection;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 use crate::db;
-use crate::translate::to_engine_command;
 use crate::protocol::{self, *};
+use crate::translate::to_engine_command;
 
 /// Who is on the other end of a connection. The host does not trade.
 #[derive(Debug, Clone)]
@@ -120,11 +120,17 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        AppState { sessions: Arc::new(Mutex::new(HashMap::new())) }
+        AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn get(&self, code: &str) -> Option<Arc<SessionHandle>> {
-        self.sessions.lock().await.get(&code.to_uppercase()).cloned()
+        self.sessions
+            .lock()
+            .await
+            .get(&code.to_uppercase())
+            .cloned()
     }
 
     /// Spawn a new session actor and register it.
@@ -237,7 +243,9 @@ pub fn db_path() -> String {
 fn generate_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
-    (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+    (0..6)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 /// A bot.
@@ -329,23 +337,37 @@ impl SessionActor {
 
         // The engine needs to know about the player before it will accept
         // orders from them.
-        let _ = self.market.apply(Command::AddPlayer { player: engine::PlayerId(player.id.clone()) });
+        let _ = self.market.apply(Command::AddPlayer {
+            player: engine::PlayerId(player.id.clone()),
+        });
 
         self.tokens.insert(token.clone(), player.id.clone());
         self.names.insert(player.id.clone(), name);
         self.players.push(player.clone());
 
         if let Some(conn) = &self.db {
-            let _ = db::insert_player(conn, &self.meta.code, &player.id, &player.name, player.joined_at);
+            let _ = db::insert_player(
+                conn,
+                &self.meta.code,
+                &player.id,
+                &player.name,
+                player.joined_at,
+            );
         }
 
         self.seq += 1;
-        let _ = self.events.send(ServerEvent::PlayerJoined { seq: self.seq, player: player.clone() });
+        let _ = self.events.send(ServerEvent::PlayerJoined {
+            seq: self.seq,
+            player: player.clone(),
+        });
         (player.id, token)
     }
 
     fn name_of(&self, id: &str) -> String {
-        self.names.get(id).cloned().unwrap_or_else(|| "?".to_string())
+        self.names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "?".to_string())
     }
 
     fn to_wire_order(&self, o: &engine::Order) -> protocol::Order {
@@ -371,17 +393,17 @@ impl SessionActor {
                 .market
                 .book
                 .bids
-                .iter()
+                .values()
                 .rev()
-                .flat_map(|(_, q)| q.iter())
+                .flatten()
                 .map(|o| self.to_wire_order(o))
                 .collect(),
             offers: self
                 .market
                 .book
                 .offers
-                .iter()
-                .flat_map(|(_, q)| q.iter())
+                .values()
+                .flatten()
                 .map(|o| self.to_wire_order(o))
                 .collect(),
         }
@@ -449,7 +471,10 @@ impl SessionActor {
                 self.persist_command(&env.cmd, None);
             }
             ClientCommand::AddBot => self.add_bot(),
-            ClientCommand::SetBotFlow { orders_per_minute, buy_bias } => {
+            ClientCommand::SetBotFlow {
+                orders_per_minute,
+                buy_bias,
+            } => {
                 self.bot_rate = orders_per_minute.clamp(0.0, 60.0);
                 self.bot_buy_bias = buy_bias.clamp(0.0, 1.0);
             }
@@ -487,7 +512,10 @@ impl SessionActor {
     fn run_engine(&mut self, cmd: Command, actor: Option<String>, env: &Envelope) {
         if let Err(reject) = self.execute_command(cmd, actor.as_deref(), &env.cmd) {
             let (reason, message) = describe(reject);
-            let _ = env.reply.send(ServerEvent::Rejected { reason, message: message.into() });
+            let _ = env.reply.send(ServerEvent::Rejected {
+                reason,
+                message: message.into(),
+            });
         }
     }
 
@@ -517,9 +545,10 @@ impl SessionActor {
         let seq = self.seq;
 
         let out = match ev {
-            engine::Event::OrderAdded { order } => {
-                ServerEvent::OrderAdded { seq, order: self.to_wire_order(&order) }
-            }
+            engine::Event::OrderAdded { order } => ServerEvent::OrderAdded {
+                seq,
+                order: self.to_wire_order(&order),
+            },
             engine::Event::OrderCancelled { order, player } => ServerEvent::OrderCancelled {
                 seq,
                 order_id: order.0.to_string(),
@@ -646,7 +675,9 @@ impl SessionActor {
             Phase::Closed => engine::Phase::Closed,
             Phase::Settled => engine::Phase::Settled,
         };
-        let Ok(events) = self.market.apply(Command::SetPhase { phase: engine_phase }) else {
+        let Ok(events) = self.market.apply(Command::SetPhase {
+            phase: engine_phase,
+        }) else {
             return false;
         };
         if let Some(conn) = &self.db {
@@ -683,13 +714,20 @@ impl SessionActor {
             })
             .collect();
 
-        self.settlement = Some(Settlement { true_value, results: results.clone() });
+        self.settlement = Some(Settlement {
+            true_value,
+            results: results.clone(),
+        });
         if let Some(conn) = &self.db {
             let _ = db::set_settlement(conn, &self.meta.code, true_value);
         }
 
         self.seq += 1;
-        let _ = self.events.send(ServerEvent::Settled { seq: self.seq, true_value, results });
+        let _ = self.events.send(ServerEvent::Settled {
+            seq: self.seq,
+            true_value,
+            results,
+        });
     }
 
     /// Append an accepted command to the replay log.
@@ -699,9 +737,17 @@ impl SessionActor {
     fn persist_command(&mut self, cmd: &ClientCommand, player_id: Option<&str>) {
         self.log_seq += 1;
         let Some(conn) = &self.db else { return };
-        let Ok(payload) = serde_json::to_string(cmd) else { return };
-        let _ =
-            db::append_command(conn, &self.meta.code, self.log_seq, player_id, &payload, now_ms());
+        let Ok(payload) = serde_json::to_string(cmd) else {
+            return;
+        };
+        let _ = db::append_command(
+            conn,
+            &self.meta.code,
+            self.log_seq,
+            player_id,
+            &payload,
+            now_ms(),
+        );
     }
 
     fn to_csv(&self) -> String {
@@ -767,5 +813,8 @@ fn describe(r: Reject) -> (RejectReason, &'static str) {
 
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

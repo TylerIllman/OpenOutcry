@@ -161,19 +161,49 @@ pub enum ServerEvent {
         settlement: Option<Settlement>,
     },
     #[serde(rename_all = "camelCase")]
-    PlayerJoined { #[ts(type = "number")] seq: u64, player: Player },
+    PlayerJoined {
+        #[ts(type = "number")]
+        seq: u64,
+        player: Player,
+    },
     #[serde(rename_all = "camelCase")]
-    PhaseChanged { #[ts(type = "number")] seq: u64, phase: Phase },
+    PhaseChanged {
+        #[ts(type = "number")]
+        seq: u64,
+        phase: Phase,
+    },
     #[serde(rename_all = "camelCase")]
-    OrderAdded { #[ts(type = "number")] seq: u64, order: Order },
+    OrderAdded {
+        #[ts(type = "number")]
+        seq: u64,
+        order: Order,
+    },
     #[serde(rename_all = "camelCase")]
-    OrderCancelled { #[ts(type = "number")] seq: u64, order_id: String, player_id: String },
+    OrderCancelled {
+        #[ts(type = "number")]
+        seq: u64,
+        order_id: String,
+        player_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    Trade { #[ts(type = "number")] seq: u64, trade: Trade, resting_order_id: String },
+    Trade {
+        #[ts(type = "number")]
+        seq: u64,
+        trade: Trade,
+        resting_order_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    Settled { #[ts(type = "number")] seq: u64, true_value: f64, results: Vec<Result> },
+    Settled {
+        #[ts(type = "number")]
+        seq: u64,
+        true_value: f64,
+        results: Vec<Result>,
+    },
     #[serde(rename_all = "camelCase")]
-    Rejected { reason: RejectReason, message: String },
+    Rejected {
+        reason: RejectReason,
+        message: String,
+    },
     #[serde(rename_all = "camelCase")]
     Error { message: String },
 }
@@ -184,17 +214,29 @@ pub enum ServerEvent {
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum ClientCommand {
     #[serde(rename_all = "camelCase")]
-    PlaceOrder { side: Side, price: f64 },
+    PlaceOrder {
+        side: Side,
+        price: f64,
+    },
     #[serde(rename_all = "camelCase")]
-    CancelOrder { order_id: String },
+    CancelOrder {
+        order_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    Take { direction: Direction },
+    Take {
+        direction: Direction,
+    },
     #[serde(rename_all = "camelCase")]
-    Resync { #[ts(type = "number")] from_seq: u64 },
+    Resync {
+        #[ts(type = "number")]
+        from_seq: u64,
+    },
     OpenTrading,
     CloseTrading,
     #[serde(rename_all = "camelCase")]
-    Settle { true_value: f64 },
+    Settle {
+        true_value: f64,
+    },
     /// Host-only. Adds one bot.
     ///
     /// Bots have no view on price. They buy and sell at random, at a rate the
@@ -205,7 +247,10 @@ pub enum ClientCommand {
     /// `orders_per_minute` is per bot. `buy_bias` is 0..1: 0.5 is even, higher
     /// buys more than it sells, so the host can lean the flow one way.
     #[serde(rename_all = "camelCase")]
-    SetBotFlow { orders_per_minute: f64, buy_bias: f64 },
+    SetBotFlow {
+        orders_per_minute: f64,
+        buy_bias: f64,
+    },
     /// Host-only. Stops the bots trading.
     RemoveBots,
 }

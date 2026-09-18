@@ -2,6 +2,8 @@
 name = "engine"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+description = "The matching engine: a pure, deterministic limit order book"
 
 # Without this the lib's default test harness is also run as a bench, and it
 # rejects criterion's command-line flags.

@@ -30,11 +30,15 @@ pub fn to_engine_command(player_id: Option<&str>, cmd: &ClientCommand) -> Option
                 Direction::Sell => engine::Direction::Sell,
             },
         },
-        ClientCommand::OpenTrading => Command::SetPhase { phase: engine::Phase::Open },
-        ClientCommand::CloseTrading => Command::SetPhase { phase: engine::Phase::Closed },
-        ClientCommand::Settle { true_value } => {
-            Command::Settle { true_value: Price::from_f64(*true_value) }
-        }
+        ClientCommand::OpenTrading => Command::SetPhase {
+            phase: engine::Phase::Open,
+        },
+        ClientCommand::CloseTrading => Command::SetPhase {
+            phase: engine::Phase::Closed,
+        },
+        ClientCommand::Settle { true_value } => Command::Settle {
+            true_value: Price::from_f64(*true_value),
+        },
         // Not engine commands. Bots act by issuing ordinary PlaceOrder / Take /
         // CancelOrder commands under their own player id, which is what keeps
         // the command log replayable despite the randomness.

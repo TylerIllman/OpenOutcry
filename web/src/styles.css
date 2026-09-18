@@ -307,7 +307,10 @@ ol, ul { list-style: none; padding: 0; }
 .settle { display: flex; align-items: flex-end; gap: 0.75rem; }
 .settle .field { min-width: 16rem; }
 
-.results { display: grid; justify-items: center; gap: 1rem; text-align: center; }
+/* `align-content: start` matters: this sits in a 1fr grid row, and auto rows
+   stretch to fill it by default, which spreads the results apart with dead
+   space instead of keeping them together under the answer. */
+.results { display: grid; justify-items: center; align-content: start; gap: 1rem; text-align: center; }
 .results__eyebrow { color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.2em; font-size: 0.8rem; }
 .results__value { font-family: var(--mono); font-size: clamp(2.5rem, 8vw, 5rem); font-weight: 800; color: var(--accent); }
 .results__unit { font-size: 0.3em; color: var(--text-dim); letter-spacing: 0; }
@@ -486,6 +489,10 @@ ol, ul { list-style: none; padding: 0; }
 /* ---------- chart ---------- */
 
 .chart { margin: 0; width: 100%; display: grid; gap: 0.6rem; }
+/* Match the leaderboard's width on the settlement screen. Left full-width the
+   chart is taller than the rest of the results put together, and pushes the
+   scores off the bottom of a projector. */
+.results .chart { max-width: min(46rem, 100%); }
 .chart__svg { width: 100%; height: auto; overflow: visible; }
 .chart__line { stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart__dot--buy { fill: var(--bid); }

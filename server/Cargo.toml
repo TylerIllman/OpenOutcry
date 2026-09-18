@@ -2,6 +2,8 @@
 name = "server"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+description = "axum server: one actor per session, SQLite-backed replay log"
 
 [dependencies]
 engine = { path = "../engine" }

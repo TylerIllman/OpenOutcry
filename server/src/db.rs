@@ -82,7 +82,10 @@ pub fn insert_session(
 }
 
 pub fn set_phase(conn: &Connection, code: &str, phase: &str) -> rusqlite::Result<()> {
-    conn.execute("UPDATE session SET phase = ?2 WHERE code = ?1", rusqlite::params![code, phase])?;
+    conn.execute(
+        "UPDATE session SET phase = ?2 WHERE code = ?1",
+        rusqlite::params![code, phase],
+    )?;
     Ok(())
 }
 
@@ -143,7 +146,9 @@ pub fn insert_trade(
         "INSERT OR REPLACE INTO trade
            (id, code, seq, price, buyer_id, seller_id, aggressor, self_trade, ts)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        rusqlite::params![id, code, seq as i64, price, buyer_id, seller_id, aggressor, self_trade, ts],
+        rusqlite::params![
+            id, code, seq as i64, price, buyer_id, seller_id, aggressor, self_trade, ts
+        ],
     )?;
     Ok(())
 }

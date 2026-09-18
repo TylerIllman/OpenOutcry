@@ -5,7 +5,15 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+license = "MIT"
+authors = ["Tyler Illman"]
+description = "An open-outcry trading game for a room full of people"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Debug symbols make the release binary ~3x larger for no benefit in a game
+# server, and the deployment image ships the release build.
+[profile.release]
+strip = true

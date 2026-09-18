@@ -53,9 +53,11 @@ pub async fn join_session(
         return (StatusCode::NOT_FOUND, "no such session").into_response();
     };
     match handle.join(name).await {
-        Some((player_id, player_token)) => {
-            Json(JoinSessionResponse { player_id, player_token }).into_response()
-        }
+        Some((player_id, player_token)) => Json(JoinSessionResponse {
+            player_id,
+            player_token,
+        })
+        .into_response(),
         None => (StatusCode::GONE, "session ended").into_response(),
     }
 }
@@ -91,9 +93,13 @@ pub async fn export_csv(
             for t in rows {
                 out.push_str(&format!(
                     "{},{},{},{},{},{},{}\n",
-                    t.seq, t.ts, t.price,
-                    csv_escape(&t.buyer), csv_escape(&t.seller),
-                    t.aggressor, t.self_trade
+                    t.seq,
+                    t.ts,
+                    t.price,
+                    csv_escape(&t.buyer),
+                    csv_escape(&t.seller),
+                    t.aggressor,
+                    t.self_trade
                 ));
             }
             out
@@ -150,7 +156,11 @@ pub async fn verify(
     let replayed = match db::open(&db_path()).and_then(|conn| replay::replay(&conn, &handle.code)) {
         Ok(market) => market.fingerprint(),
         Err(e) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, format!("replay failed: {e}")).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("replay failed: {e}"),
+            )
+                .into_response();
         }
     };
 

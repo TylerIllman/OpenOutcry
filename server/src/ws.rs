@@ -43,7 +43,10 @@ async fn handle_socket(socket: WebSocket, q: WsQuery, app: AppState) {
         Who::Host
     } else if let Some(token) = q.player_token.clone() {
         match handle.resolve(token).await {
-            Some(p) => Who::Player { id: p.id, name: p.name },
+            Some(p) => Who::Player {
+                id: p.id,
+                name: p.name,
+            },
             None => {
                 close_with(socket, "unknown player token").await;
                 return;
@@ -117,7 +120,9 @@ where
 }
 
 async fn close_with(mut socket: WebSocket, reason: &str) {
-    let ev = ServerEvent::Error { message: reason.to_string() };
+    let ev = ServerEvent::Error {
+        message: reason.to_string(),
+    };
     if let Ok(json) = serde_json::to_string(&ev) {
         let _ = socket.send(Message::Text(json.into())).await;
     }

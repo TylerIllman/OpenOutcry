@@ -1,10 +1,14 @@
 # Decision log
 
-Every decision from the scoping session on 2026-08-28, in the order it was taken, with
-the options that were rejected and why. Two decisions were reversed mid-session; both
-reversals are recorded rather than tidied away.
+Every decision taken on this project, in the order it was taken, with the options
+that were rejected and why.
 
-Conclusions live in `SPEC.md`. This file is the reasoning behind them.
+Three of them were reversed after the fact, and those are recorded rather than
+tidied away — where it runs (#7), what a player sees mid-round (#20), and how
+the bots behave (#29). The rejected options are the useful part: most of them
+were reasonable, and a couple were built before being torn out.
+
+Conclusions live in [SPEC.md](SPEC.md). This file is the reasoning behind them.
 
 ---
 
@@ -189,7 +193,7 @@ fact — worse for both the engine and the player.
 `Trade.selfTrade` is on the wire and the tape renders a `self` chip. This is the
 mitigation raised against decision 19, now taken.
 
-### 29. Bots are dumb flow, not opponents
+### 29. Bots are dumb flow, not opponents — **REVERSED TWICE**
 Bots **only take** — they never quote — and they have **no view on price**. The
 host sets a rate and a buy/sell lean; everything else is random.
 *Rejected:* market-making bots that quote both sides around an anchor (built
